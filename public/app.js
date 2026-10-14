@@ -23,6 +23,7 @@ const state = {
   repeat: localStorage.getItem('tv2-repeat') === 'one' ? 'one' : 'all',
   shuffle: localStorage.getItem('tv2-shuffle') === '1',
   shuffleBack: [],
+  shuffleSeen: new Set(),
   listScroll: 0,
   cats: [],
   tricks: [],
@@ -33,7 +34,8 @@ const state = {
   thumbToken: 0,
   listSeq: 0,
   cues: [],
-  subs: []
+  subs: [],
+  cardPrefs: null
 };
 
 const ACCENTS = [
@@ -268,13 +270,30 @@ function openTag(filePath, index) {
   selectFolder(node.path).catch((err) => toast(err.message));
 }
 
+function itemKey(item) {
+  if (!item) return '';
+  return item.id || item.path || item.key || '';
+}
+function matchesQuery(parts, words) {
+  if (!words.length) return true;
+  const hay = parts.filter(Boolean).join('\n').toLowerCase();
+  return words.every((word) => hay.includes(word));
+}
+function noteMarkHtml(file) {
+  const text = String(file?.note || file?.notes || '').trim();
+  if (!file?.hasNote && !text) return '';
+  return `<span class="note-mark" tabindex="0">有笔记${text ? `<span class="note-pop">${esc(text)}</span>` : ''}</span>`;
+}
+function resetShuffleCycle() {
+  state.shuffleBack = [];
+  state.shuffleSeen = new Set();
+}
 function visibleFiles(files) {
   const words = state.query.trim().toLowerCase().split(/\s+/).filter(Boolean);
   const rank = new Map(state.history.map((row, index) => [row.trickId, index]));
   return files.filter((file) => {
     if (state.filter !== 'all' && file.type !== state.filter) return false;
-    const name = (file.name || '').toLowerCase();
-    return words.every((word) => name.includes(word));
+    return matchesQuery([file.name, file.note, file.notes], words);
   }).sort((a, b) => {
     if (state.sort === 'name_desc') return b.name.localeCompare(a.name, 'zh');
     if (state.sort === 'time_desc') return (b.birthtime || 0) - (a.birthtime || 0);
@@ -485,7 +504,10 @@ function renderFolderHead() {
   const info = state.folderInfo || { name: '', path: state.folder, hasThumb: false };
   const thumb = info.hasThumb ? `/api/folder-thumb?${qs({ path: info.path, _: state.coverStamp })}` : '';
   $('folderHead').innerHTML = `
-    <button class="cover" id="coverBtn" type="button" title="上传文件夹封面">${thumb ? `<img src="${esc(thumb)}" alt="">` : '封面'}</button>
+    <div class="cover-wrap${thumb ? ' has-thumb' : ''}">
+      <button class="cover" id="coverBtn" type="button" title="上传文件夹封面">${thumb ? `<img src="${esc(thumb)}" alt="">` : '封面'}</button>
+      ${thumb ? '<button class="cover-remove" id="coverRemove" type="button" title="删除封面" aria-label="删除封面">×</button>' : ''}
+    </div>
     <div class="folder-copy">
       <div class="folder-crumbs">${breadcrumbHtml({ large: true })}</div>
     </div>
@@ -493,6 +515,23 @@ function renderFolderHead() {
     <input id="coverInput" type="file" accept="image/*" hidden>
   `;
   $('coverBtn').onclick = () => $('coverInput').click();
+  const remove = $('coverRemove');
+  if (remove) {
+    remove.onclick = async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      try {
+        await api('/api/folder-thumb?' + qs({ path: info.path || state.folder }), { method: 'DELETE' });
+        state.folderInfo.hasThumb = false;
+        const node = findNode(state.tree, state.folder);
+        if (node) node.hasThumb = false;
+        state.coverStamp += 1;
+        renderFolderHead();
+        renderSide();
+        toast('封面已删除');
+      } catch (err) { toast(err.message); }
+    };
+  }
   $('coverInput').onchange = async () => {
     const file = $('coverInput').files[0];
     if (!file) return;
@@ -518,9 +557,12 @@ function fillCard(card, file) {
   card.classList.remove('placeholder');
   const nested = dirname(file.path) !== state.folder;
   const where = nested ? dirname(file.path).split(/[/\\]/).pop() : '';
+  const bits = [esc(formatSize(file.size)), where ? esc(where) : ''].filter(Boolean);
+  const note = noteMarkHtml(file);
+  const sub = [bits.join(' · '), note].filter(Boolean).join(bits.length && note ? ' · ' : '');
   card.innerHTML = `
     <div class="thumb"><img alt="" loading="lazy" src="/api/thumbnail?${qs({ path: file.path, t: state.thumbTime, _: state.coverStamp })}"><span class="badge">${esc(file.name.split('.').pop().toUpperCase())}</span></div>
-    <div class="meta"><div class="name">${esc(file.name)}</div><div class="sub">${esc([formatSize(file.size), where, file.hasNote ? '有笔记' : ''].filter(Boolean).join(' · '))}</div>${folderTags(file.path).length ? `<div class="card-tags">${tagButtons(folderTags(file.path))}</div>` : ''}</div>`;
+    <div class="meta"><div class="name">${esc(file.name)}</div><div class="sub">${sub}</div>${folderTags(file.path).length ? `<div class="card-tags">${tagButtons(folderTags(file.path))}</div>` : ''}</div>`;
   const img = card.querySelector('img');
   if (img) img.onerror = () => img.remove();
 }
@@ -571,6 +613,7 @@ function syncPathInput() {
 }
 async function selectFolder(dir, opts = {}) {
   if (!opts.keepPlayer) closePlayer();
+  resetShuffleCycle();
   state.folder = dir;
   syncPathInput();
   localStorage.setItem('tv2-folder', dir);
@@ -586,15 +629,15 @@ async function selectFolder(dir, opts = {}) {
   renderFolderHead();
   const seq = ++state.listSeq;
   $('grid').innerHTML = '<div class="empty">正在列出文件…</div>';
-  const [data, time] = await Promise.all([
+  const [data, prefs] = await Promise.all([
     api('/api/files?' + qs({ path: dir })),
-    api('/api/thumb-time?' + qs({ path: dir })).catch(() => ({ time: state.thumbTime }))
+    loadCardPrefs(dir)
   ]);
   if (seq !== state.listSeq) return;
   state.files = data.files || [];
   state.folderInfo = { name: data.name || state.folderInfo.name, path: dir, hasThumb: !!data.hasThumb };
-  state.thumbTime = Number(time.time ?? 1);
-  applyCardPrefs(readCardPrefs(dir));
+  state.thumbTime = Number(prefs.thumbTime ?? 1);
+  applyCardPrefs(prefs);
   if ($('thumbSlider')) {
     $('thumbSlider').value = state.thumbTime;
     if ($('thumbLabel')) $('thumbLabel').textContent = state.thumbTime + 's';
@@ -690,81 +733,118 @@ function showCue(time) {
   const cue = state.cues.find((item) => time >= item.start && time <= item.end);
   overlay.textContent = cue ? cue.text : '';
 }
-const CARD_DEFAULTS = { size: 280, ratio: 56, ui: 'out', fit: 'contain' };
-function cardPrefsMap() {
-  try { return JSON.parse(localStorage.getItem('tv2-card-prefs') || '{}'); } catch { return {}; }
-}
-function saveCardPrefsMap(map) {
-  localStorage.setItem('tv2-card-prefs', JSON.stringify(map));
-}
-function migrateLegacyCardPrefs() {
-  const map = cardPrefsMap();
-  if (map['*']) return;
-  const size = Number(localStorage.getItem('tv2-card-size'));
-  const ratio = Number(localStorage.getItem('tv2-card-ratio'));
-  if (!size && !ratio) return;
-  map['*'] = {
-    size: size || CARD_DEFAULTS.size,
-    ratio: ratio || CARD_DEFAULTS.ratio,
-    ui: CARD_DEFAULTS.ui,
-    fit: CARD_DEFAULTS.fit
+const CARD_DEFAULTS = { size: 280, ratio: 56, ui: 'out', fit: 'contain', thumbTime: 1 };
+function normalizeCardPrefs(raw) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  return {
+    size: Math.min(560, Math.max(160, Number(src.size) || CARD_DEFAULTS.size)),
+    ratio: Math.min(200, Math.max(50, Number(src.ratio) || CARD_DEFAULTS.ratio)),
+    ui: src.ui === 'in' ? 'in' : 'out',
+    fit: src.fit === 'cover' || src.fit === 'fit' ? 'cover' : 'contain',
+    thumbTime: Math.min(180, Math.max(0, Number(src.thumbTime ?? src.time) || CARD_DEFAULTS.thumbTime)),
+    source: src.source || '',
+    from: src.from || ''
   };
-  saveCardPrefsMap(map);
 }
-function readCardPrefs(folder = state.folder) {
-  const map = cardPrefsMap();
-  const result = { ...CARD_DEFAULTS, ...(map['*'] || {}) };
-  if (!folder) return result;
-  if (map[folder]) return { ...result, ...map[folder] };
-  let best = '';
-  for (const key of Object.keys(map)) {
-    if (key === '*' || !key) continue;
-    if (underPath(folder, key) && key.length >= best.length) best = key;
+function readLegacyCardPrefs(folder) {
+  try {
+    const map = JSON.parse(localStorage.getItem('tv2-card-prefs') || '{}');
+    if (folder && map[folder]) return normalizeCardPrefs(map[folder]);
+    if (map['*']) return normalizeCardPrefs(map['*']);
+    const size = Number(localStorage.getItem('tv2-card-size'));
+    const ratio = Number(localStorage.getItem('tv2-card-ratio'));
+    if (size || ratio) return normalizeCardPrefs({ size, ratio });
+  } catch { /* ignore */ }
+  return null;
+}
+function clearLegacyCardPrefs() {
+  localStorage.removeItem('tv2-card-prefs');
+  localStorage.removeItem('tv2-card-size');
+  localStorage.removeItem('tv2-card-ratio');
+}
+function readCardPrefs() {
+  return normalizeCardPrefs(state.cardPrefs || CARD_DEFAULTS);
+}
+function snapshotCardPrefs() {
+  const current = readCardPrefs();
+  return { size: current.size, ratio: current.ratio, ui: current.ui, fit: current.fit, thumbTime: current.thumbTime };
+}
+async function loadCardPrefs(folder) {
+  if (!folder) {
+    state.cardPrefs = { ...CARD_DEFAULTS };
+    return state.cardPrefs;
   }
-  if (best) return { ...result, ...map[best] };
-  return result;
+  let prefs = normalizeCardPrefs(await api('/api/card-prefs?' + qs({ path: folder })).catch(() => CARD_DEFAULTS));
+  if (prefs.source === 'default' || prefs.source === 'legacy') {
+    const legacy = readLegacyCardPrefs(folder);
+    if (legacy) {
+      prefs = await api('/api/card-prefs', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: folder, ...legacy, thumbTime: prefs.thumbTime || legacy.thumbTime })
+      }).then((data) => normalizeCardPrefs(data.prefs || legacy)).catch(() => legacy);
+      clearLegacyCardPrefs();
+    } else if (prefs.source === 'legacy') {
+      await api('/api/card-prefs', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: folder, ...prefs })
+      }).catch(() => {});
+    }
+  }
+  state.cardPrefs = prefs;
+  return prefs;
 }
-function writeCardPrefs(partial, folder = state.folder) {
-  const map = cardPrefsMap();
-  const key = folder || '*';
-  map[key] = { ...readCardPrefs(folder), ...partial };
-  saveCardPrefsMap(map);
-  applyCardPrefs(readCardPrefs(folder));
+async function writeCardPrefs(partial, folder = state.folder) {
+  if (!folder) return toast('先打开一个文件夹');
+  const next = normalizeCardPrefs({ ...readCardPrefs(), ...partial, thumbTime: partial.thumbTime ?? state.thumbTime });
+  state.cardPrefs = next;
+  state.thumbTime = next.thumbTime;
+  applyCardPrefs(next);
+  try {
+    const data = await api('/api/card-prefs', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: folder, ...next })
+    });
+    state.cardPrefs = normalizeCardPrefs(data.prefs || next);
+  } catch (err) { toast(err.message); }
 }
-function snapshotCardPrefs(folder = state.folder) {
-  const current = readCardPrefs(folder);
-  return { size: current.size, ratio: current.ratio, ui: current.ui, fit: current.fit };
-}
-function applyCardPrefsToAll() {
-  const prefs = snapshotCardPrefs();
-  saveCardPrefsMap({ '*': prefs });
-  applyCardPrefs(prefs);
-  toast('已应用到所有文件夹');
-}
-function collectFolderPaths(node, out = []) {
-  if (!node || !node.path) return out;
-  out.push(node.path);
-  for (const child of node.folders || []) collectFolderPaths(child, out);
-  return out;
-}
-function applyCardPrefsToSubfolders() {
+async function applyCardPrefsToSubfolders() {
   const base = state.folder;
-  if (!base) {
-    toast('先打开一个文件夹');
-    return;
-  }
-  const prefs = snapshotCardPrefs(base);
-  const map = cardPrefsMap();
-  const node = findNode(state.tree, base);
-  const paths = node ? collectFolderPaths(node) : [base];
-  for (const path of paths) map[path] = { ...prefs };
-  for (const key of Object.keys(map)) {
-    if (key === '*' || key === base) continue;
-    if (underPath(key, base) && !paths.includes(key)) map[key] = { ...prefs };
-  }
-  saveCardPrefsMap(map);
-  applyCardPrefs(prefs);
-  toast('已应用到全部子文件夹（' + paths.length + ' 个）');
+  if (!base) return toast('先打开一个文件夹');
+  const prefs = snapshotCardPrefs();
+  try {
+    const data = await api('/api/card-prefs/apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: base, ...prefs })
+    });
+    state.cardPrefs = normalizeCardPrefs(data.prefs || prefs);
+    applyCardPrefs(state.cardPrefs);
+    toast('已写入全部子文件夹（' + (data.count || 0) + ' 个 .tv2-card.json）');
+  } catch (err) { toast(err.message); }
+}
+async function applyCardPrefsToAll() {
+  const base = state.root || state.folder;
+  if (!base) return toast('先打开资料库');
+  const prefs = snapshotCardPrefs();
+  try {
+    const data = await api('/api/card-prefs/apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: base, ...prefs })
+    });
+    state.cardPrefs = normalizeCardPrefs(data.prefs || prefs);
+    applyCardPrefs(state.cardPrefs);
+    toast('已写入资料库全部文件夹（' + (data.count || 0) + ' 个 .tv2-card.json）');
+  } catch (err) { toast(err.message); }
+}
+function refreshCovers() {
+  state.coverStamp = Date.now();
+  renderGrid();
+  renderFolderHead();
+  toast('封面已刷新');
 }
 function cardRatioLabel(heightPct) {
   const h = Number(heightPct) || 56;
@@ -850,32 +930,34 @@ function renderCardPrefs() {
       <button type="button" data-fit="fit" class="${prefs.fit === 'cover' || prefs.fit === 'fit' ? 'active' : ''}">Fit</button>
     </div>
     <div class="card-prefs-actions">
+      <button class="text-btn" id="cardPrefsRefreshCovers" type="button">刷新封面</button>
       <button class="solid-btn" id="cardPrefsApplySubs" type="button">应用到全部子文件夹</button>
-      <button class="text-btn" id="cardPrefsApplyAll" type="button">应用到所有文件夹</button>
+      <button class="text-btn" id="cardPrefsApplyAll" type="button">应用到资料库全部</button>
     </div>
+    <div class="sub" style="margin: 4px 8px 2px;">设置保存在文件夹下的 .tv2-card.json</div>
   `;
   $('thumbSlider').oninput = () => {
     state.thumbTime = Number($('thumbSlider').value);
     $('thumbLabel').textContent = state.thumbTime + 's';
     clearTimeout(state._thumbTimer);
     state._thumbTimer = setTimeout(() => {
-      if (!state.folder) return;
-      api('/api/thumb-time', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: state.folder, time: state.thumbTime })
-      }).catch(() => {});
+      writeCardPrefs({ thumbTime: state.thumbTime }).then(() => {
+        state.coverStamp = Date.now();
+        renderGrid();
+      });
     }, 400);
   };
   $('cardSize').oninput = () => {
     const size = Number($('cardSize').value);
     applyCardSize(size);
-    writeCardPrefs({ size });
+    clearTimeout(state._cardSizeTimer);
+    state._cardSizeTimer = setTimeout(() => writeCardPrefs({ size }), 250);
   };
   $('cardRatio').oninput = () => {
     const ratio = Number($('cardRatio').value);
     applyCardRatio(ratio);
-    writeCardPrefs({ ratio });
+    clearTimeout(state._cardRatioTimer);
+    state._cardRatioTimer = setTimeout(() => writeCardPrefs({ ratio }), 250);
   };
   $('cardUiSeg').onclick = (event) => {
     const button = event.target.closest('[data-ui]');
@@ -887,6 +969,7 @@ function renderCardPrefs() {
     if (!button) return;
     writeCardPrefs({ fit: button.dataset.fit === 'fit' ? 'cover' : 'contain' });
   };
+  $('cardPrefsRefreshCovers').onclick = () => refreshCovers();
   $('cardPrefsApplySubs').onclick = () => applyCardPrefsToSubfolders();
   $('cardPrefsApplyAll').onclick = () => applyCardPrefsToAll();
 }
@@ -1252,17 +1335,31 @@ function openListItem(item, time) {
 function playRelative(step) {
   const list = currentList();
   if (!state.player || !list.length) return;
-  const key = state.player.kind === 'trick' ? state.player.id : state.player.path || state.player.key;
-  const index = list.findIndex((item) => (item.id || item.path || item.key) === key);
+  const key = itemKey(state.player);
+  const index = list.findIndex((item) => itemKey(item) === key);
   if (step < 0 && state.shuffle && state.shuffleBack.length) {
     openListItem(state.shuffleBack.pop());
     return;
   }
   let next;
   if (step > 0 && state.shuffle && list.length > 1) {
-    const pool = list.filter((_, i) => i !== index);
-    next = pool[Math.floor(Math.random() * pool.length)];
-    state.shuffleBack.push(list[index]);
+    if (!(state.shuffleSeen instanceof Set)) state.shuffleSeen = new Set();
+    if (key) state.shuffleSeen.add(key);
+    let pool = list.filter((item) => {
+      const k = itemKey(item);
+      return k && k !== key && !state.shuffleSeen.has(k);
+    });
+    // Finish the whole folder once before any repeats.
+    if (!pool.length) {
+      state.shuffleSeen = new Set(key ? [key] : []);
+      pool = list.filter((item) => {
+        const k = itemKey(item);
+        return k && k !== key;
+      });
+    }
+    next = pool[Math.floor(Math.random() * pool.length)] || list[(index + 1 + list.length) % list.length];
+    if (index >= 0) state.shuffleBack.push(list[index]);
+    if (state.shuffleBack.length > list.length) state.shuffleBack = state.shuffleBack.slice(-list.length);
   } else {
     next = list[(index + step + list.length) % list.length];
   }
@@ -1303,9 +1400,15 @@ async function saveNotes() {
   if (!player) return;
   const text = $('notes').value;
   try {
-    if (player.kind === 'file') await api('/api/notes', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: player.path, text }) });
-    else if (player.kind === 'trick') await api('/api/tricks/' + player.id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ notes: text }) });
-    else await writeLocalNote(player, text);
+    if (player.kind === 'file') {
+      await api('/api/notes', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: player.path, text }) });
+      const file = state.files.find((row) => row.path === player.path);
+      if (file) { file.note = text; file.hasNote = !!text.trim(); }
+    } else if (player.kind === 'trick') {
+      await api('/api/tricks/' + player.id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ notes: text }) });
+      const trick = state.tricks.find((row) => row.id === player.id);
+      if (trick) trick.notes = text;
+    } else await writeLocalNote(player, text);
   } catch (err) { toast(err.message); }
 }
 
@@ -1623,7 +1726,6 @@ function renderHelp() {
       <kbd>S</kbd><span>截图</span>
       <kbd>D</kbd><span>下载</span>
       <kbd>P</kbd><span>显示或藏起控件</span>
-      <kbd>F4</kbd><span>转成 720p</span>
       <kbd>M</kbd><span>预览声音开/关</span>
       <kbd>O</kbd><span>从预览打开视频</span>
       <kbd>Esc</kbd><span>关闭预览 / 返回</span>
@@ -1738,15 +1840,19 @@ async function loadLibrary() {
   state.tricks = await api('/api/tricks' + (state.category ? '?' + qs({ category: state.category }) : ''));
   renderLibrarySide();
   const words = state.query.trim().toLowerCase().split(/\s+/).filter(Boolean);
-  const tricks = state.tricks.filter((trick) => words.every((word) => (trick.name || '').toLowerCase().includes(word)));
+  const tricks = state.tricks.filter((trick) => matchesQuery([trick.name, trick.notes], words));
   state.trickPlaylist = tricks;
   if (previewOpen()) closePreviewNow();
-  $('trickGrid').innerHTML = tricks.map((trick) => `
+  $('trickGrid').innerHTML = tricks.map((trick) => {
+    const note = noteMarkHtml({ hasNote: !!(trick.notes || '').trim(), notes: trick.notes });
+    const bits = [esc(formatSize(trick.fileSize))];
+    const sub = [bits.join(' · '), note].filter(Boolean).join(note ? ' · ' : '');
+    return `
     <button class="card" type="button" data-trick="${trick.id}">
       <div class="thumb">${trick.thumbnail ? `<img src="${esc(trick.thumbnail)}" alt="">` : ''}<span class="badge">${trick.mediaType === 'gif' ? 'GIF' : '视频'}</span></div>
-      <div class="meta"><div class="name">${esc(trick.name)}</div><div class="sub">${esc(formatSize(trick.fileSize))}</div></div>
-    </button>
-  `).join('') || '<div class="empty">收藏库还是空的。上传一段就行。</div>';
+      <div class="meta"><div class="name">${esc(trick.name)}</div><div class="sub">${sub}</div></div>
+    </button>`;
+  }).join('') || '<div class="empty">收藏库还是空的。上传一段就行。</div>';
   $('trickGrid').querySelectorAll('[data-trick]').forEach((card) => {
     card.onclick = () => openTrick(state.tricks.find((trick) => trick.id === card.dataset.trick));
   });
@@ -1910,13 +2016,21 @@ async function renderLocalGrid() {
   const handle = state.local.map.get(state.local.folder);
   if (!handle) return;
   const files = await collectLocalFiles(handle, state.local.folder);
+  files.forEach((file) => {
+    const note = localNote(file.key);
+    file.note = note;
+    file.hasNote = !!String(note || '').trim();
+  });
   files.sort((a, b) => a.name.localeCompare(b.name, 'zh'));
   const words = state.query.trim().toLowerCase().split(/\s+/).filter(Boolean);
-  state.local.files = files.filter((file) => words.every((word) => file.name.toLowerCase().includes(word)) && (state.filter === 'all' || file.type === state.filter));
+  state.local.files = files.filter((file) => (state.filter === 'all' || file.type === state.filter) && matchesQuery([file.name, file.note], words));
   $('localCrumbs').textContent = state.local.folder;
   $('localGrid').innerHTML = state.local.files.map((file) => {
     const where = file.parent !== state.local.folder ? file.parent.split('/').pop() : '';
-    return `<button class="card" type="button" draggable="true" data-local-file="${esc(file.key)}"><div class="thumb"><span class="badge">${esc(file.name.split('.').pop().toUpperCase())}</span></div><div class="meta"><div class="name">${esc(file.name)}</div><div class="sub">${esc(where)}</div></div></button>`;
+    const bits = [where ? esc(where) : ''].filter(Boolean);
+    const note = noteMarkHtml(file);
+    const sub = [bits.join(' · '), note].filter(Boolean).join(bits.length && note ? ' · ' : '');
+    return `<button class="card" type="button" draggable="true" data-local-file="${esc(file.key)}"><div class="thumb"><span class="badge">${esc(file.name.split('.').pop().toUpperCase())}</span></div><div class="meta"><div class="name">${esc(file.name)}</div><div class="sub">${sub}</div></div></button>`;
   }).join('') || '<div class="empty">这里没有媒体文件。</div>';
 }
 async function openLocalFile(file, time) {
@@ -2702,8 +2816,8 @@ function wire() {
     if (state.view === 'browse') renderGrid();
     if (state.view === 'local') renderLocalGrid().catch(() => {});
   };
-  migrateLegacyCardPrefs();
-  applyCardPrefs(readCardPrefs(state.folder || localStorage.getItem('tv2-folder') || ''));
+  state.cardPrefs = { ...CARD_DEFAULTS };
+  applyCardPrefs(CARD_DEFAULTS);
   ['grid', 'trickGrid', 'localGrid'].forEach((id) => { if ($(id)) bindHover($(id)); });
   $('hoverSound').onclick = (event) => {
     event.stopPropagation();
@@ -2790,7 +2904,6 @@ function wire() {
     if (Date.now() - previewKeyDownAt < 280) togglePreviewHotkey();
   });
   bindRightHold($('detailVideoBox'));
-  $('refreshCovers').onclick = () => { state.coverStamp = Date.now(); renderGrid(); renderFolderHead(); };
   $('uploadBtn').onclick = () => $('uploadInput').click();
   $('uploadInput').onchange = async () => {
     if (!state.folder || !$('uploadInput').files.length) return;
@@ -2853,10 +2966,10 @@ function wire() {
   };
   $('shuffleBtn').onclick = () => {
     state.shuffle = !state.shuffle;
-    if (!state.shuffle) state.shuffleBack = [];
+    resetShuffleCycle();
     localStorage.setItem('tv2-shuffle', state.shuffle ? '1' : '0');
     syncSortButtons();
-    toast(state.shuffle ? '随机已开' : '随机已关');
+    toast(state.shuffle ? '随机已开（播完一轮才重复）' : '随机已关');
   };
   $('detailDelete').onclick = async () => {
     if (state.player?.kind !== 'file') return;
@@ -2867,8 +2980,14 @@ function wire() {
   $('shotBtn').onclick = screenshot;
   $('snapPrev').onclick = () => stepSnap(-1);
   $('snapNext').onclick = () => stepSnap(1);
-  $('snapClose').onclick = () => { $('snapPreview').hidden = true; };
-  $('snapPreview').onclick = (event) => { if (event.target === $('snapPreview')) $('snapPreview').hidden = true; };
+  $('snapClose').onclick = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    $('snapPreview').hidden = true;
+  };
+  $('snapPreview').onclick = (event) => {
+    if (event.target === $('snapPreview') || event.target.closest('#snapClose')) $('snapPreview').hidden = true;
+  };
   $('snapSave').onclick = () => {
     if (!snapCanvas) return;
     const link = document.createElement('a');
@@ -3148,10 +3267,6 @@ function wire() {
     }
     if (event.key === 'Delete' && state.player.kind === 'file') {
       if (await deletePath(state.player.path, false)) { closePlayer(); await refreshBrowse(); }
-    }
-    if (event.key === 'F4' && state.player.kind === 'file') {
-      event.preventDefault();
-      startConvert('/api/convert/file?' + qs({ path: state.player.path, quality: '720p' })).catch((err) => toast(err.message));
     }
   }, true);
 }

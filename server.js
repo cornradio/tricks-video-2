@@ -296,13 +296,21 @@ async function describeMedia(dirPath, name, names, subs) {
   } catch { /* raced with a delete */ }
   const ext = path.extname(name).toLowerCase();
   const base = path.basename(name, ext);
+  const noteName = name + '.notes.txt';
+  let note = '';
+  if (names.has(noteName)) {
+    try {
+      note = (await lease.readWhole(path.join(dirPath, noteName), 256 * 1024)).toString('utf8');
+    } catch { /* missing / locked */ }
+  }
   return {
     name,
     path: full,
     size,
     birthtime,
     type: IMAGE_EXTS.has(ext) ? 'image' : 'video',
-    hasNote: names.has(name + '.notes.txt'),
+    hasNote: names.has(noteName),
+    note,
     subtitles: subs
       .filter((sub) => path.basename(sub, path.extname(sub)) === base)
       .map((sub) => ({ name: sub, path: path.join(dirPath, sub) }))
@@ -672,22 +680,119 @@ app.delete('/api/cover', async (req, res) => {
   }
 });
 
-app.get('/api/thumb-time', (req, res) => {
-  const dirPath = needPath(req, res);
-  if (!dirPath) return;
+const CARD_PREFS_FILE = '.tv2-card.json';
+const CARD_PREFS_DEFAULTS = { size: 280, ratio: 56, ui: 'out', fit: 'contain', thumbTime: 1 };
+function cardPrefsPath(dirPath) {
+  return path.join(dirPath, CARD_PREFS_FILE);
+}
+function normalizeCardPrefs(raw) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const ui = src.ui === 'in' ? 'in' : 'out';
+  const fit = src.fit === 'cover' || src.fit === 'fit' ? 'cover' : 'contain';
+  return {
+    size: Math.min(560, Math.max(160, Number(src.size) || CARD_PREFS_DEFAULTS.size)),
+    ratio: Math.min(200, Math.max(50, Number(src.ratio) || CARD_PREFS_DEFAULTS.ratio)),
+    ui,
+    fit,
+    thumbTime: Math.min(180, Math.max(0, Number(src.thumbTime ?? src.time) || CARD_PREFS_DEFAULTS.thumbTime))
+  };
+}
+async function readCardPrefsFile(dirPath) {
+  try {
+    const buf = await lease.readWhole(cardPrefsPath(dirPath), 64 * 1024);
+    return normalizeCardPrefs(JSON.parse(buf.toString('utf8')));
+  } catch {
+    return null;
+  }
+}
+async function writeCardPrefsFile(dirPath, prefs) {
+  const next = normalizeCardPrefs(prefs);
+  await lease.writeAtomic(cardPrefsPath(dirPath), JSON.stringify(next, null, 2) + '\n');
+  return next;
+}
+async function resolveCardPrefs(dirPath) {
+  let cur = path.resolve(dirPath);
+  const seen = new Set();
+  while (cur && !seen.has(cur)) {
+    seen.add(cur);
+    const local = await readCardPrefsFile(cur);
+    if (local) {
+      return { ...local, source: samePath(cur, dirPath) ? 'file' : 'parent', from: cur };
+    }
+    const parent = path.dirname(cur);
+    if (parent === cur || !allowed(parent)) break;
+    cur = parent;
+  }
   const times = readJson(FILES.thumbs, {});
   const found = Object.entries(times).find(([key]) => samePath(key, dirPath));
-  res.json({ time: found ? found[1] : 1 });
+  if (found) {
+    return { ...CARD_PREFS_DEFAULTS, thumbTime: Number(found[1]) || 1, source: 'legacy', from: '' };
+  }
+  return { ...CARD_PREFS_DEFAULTS, source: 'default', from: '' };
+}
+async function collectDirPaths(dirPath, out = []) {
+  out.push(dirPath);
+  let entries = [];
+  try { entries = await readEntries(dirPath); } catch { return out; }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (entry.name === '.' || entry.name === '..') continue;
+    await collectDirPaths(path.join(dirPath, entry.name), out);
+  }
+  return out;
+}
+
+app.get('/api/card-prefs', async (req, res) => {
+  const dirPath = needPath(req, res);
+  if (!dirPath) return;
+  try {
+    res.json(await resolveCardPrefs(dirPath));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
-app.post('/api/thumb-time', (req, res) => {
+app.put('/api/card-prefs', async (req, res) => {
+  const dirPath = req.body?.path;
+  if (!dirPath) return res.status(400).json({ error: '缺少路径' });
+  if (!allowed(dirPath)) return res.status(403).json({ error: '该路径不在白名单中' });
+  try {
+    const prefs = await writeCardPrefsFile(dirPath, req.body);
+    res.json({ success: true, prefs });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+app.post('/api/card-prefs/apply', async (req, res) => {
+  const dirPath = req.body?.path;
+  if (!dirPath) return res.status(400).json({ error: '缺少路径' });
+  if (!allowed(dirPath)) return res.status(403).json({ error: '该路径不在白名单中' });
+  const prefs = normalizeCardPrefs(req.body);
+  try {
+    const dirs = await collectDirPaths(dirPath);
+    for (const dir of dirs) await writeCardPrefsFile(dir, prefs);
+    res.json({ success: true, count: dirs.length, prefs });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/thumb-time', async (req, res) => {
+  const dirPath = needPath(req, res);
+  if (!dirPath) return;
+  const prefs = await resolveCardPrefs(dirPath);
+  res.json({ time: prefs.thumbTime });
+});
+app.post('/api/thumb-time', async (req, res) => {
   const dirPath = req.body?.path;
   if (!dirPath || req.body.time == null) return res.status(400).json({ error: '参数不完整' });
   if (!allowed(dirPath)) return res.status(403).json({ error: '该路径不在白名单中' });
-  const times = readJson(FILES.thumbs, {});
-  const key = Object.keys(times).find((item) => samePath(item, dirPath)) || dirPath;
-  times[key] = Number(req.body.time);
-  writeJson(FILES.thumbs, times);
-  res.json({ success: true });
+  try {
+    const current = (await readCardPrefsFile(dirPath)) || { ...CARD_PREFS_DEFAULTS };
+    const prefs = await writeCardPrefsFile(dirPath, { ...current, thumbTime: Number(req.body.time) });
+    res.json({ success: true, time: prefs.thumbTime });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get('/api/notes', async (req, res) => {
