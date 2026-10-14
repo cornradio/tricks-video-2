@@ -180,6 +180,16 @@ function releaseVideo() {
   state.thumbToken += 1;
 }
 
+function syncTopChrome() {
+  const top = document.querySelector('.top');
+  if (!top) return;
+  const playing = !$('player').hidden;
+  const mobile = window.matchMedia('(max-width: 900px)').matches;
+  const scrolled = ($('main')?.scrollTop || 0) > 12;
+  // Playing: never need search/sort. Mobile list scroll: compact sticky bar.
+  top.classList.toggle('filters-collapsed', playing || (mobile && scrolled));
+  document.querySelector('.app')?.classList.toggle('playing', playing);
+}
 function showPlayerPage() {
   if (typeof hideHover === 'function') hideHover();
   if ($('player').hidden) state.listScroll = $('main').scrollTop;
@@ -189,13 +199,13 @@ function showPlayerPage() {
   const box = $('detailVideoBox');
   const saved = localStorage.getItem('tv2-video-height');
   if (box) box.style.height = saved ? saved + 'px' : '50vh';
+  syncTopChrome();
 }
 function closePlayer() {
   const wasOpen = !$('player').hidden;
   releaseVideo();
   $('player').hidden = true;
-  $('douyinOverlay').hidden = true;
-  $('douyinBtn').classList.remove('on');
+  leaveDouyin();
   state.player = null;
   state.markA = null;
   state.markB = null;
@@ -205,6 +215,7 @@ function closePlayer() {
     panel.hidden = panel.dataset.viewPanel !== state.view;
   });
   if (wasOpen) $('main').scrollTop = state.listScroll || 0;
+  syncTopChrome();
 }
 function currentList() {
   if (state.view === 'library') return state.trickPlaylist || [];
@@ -1232,11 +1243,11 @@ function bindRightHold(target) {
     }
   });
 }
-function openListItem(item) {
+function openListItem(item, time) {
   if (!item) return;
-  if (item.videoPath || item.kind === 'trick' || state.view === 'library' && item.id && !item.path) openTrick(item);
-  else if (state.view === 'local' || item.handle) openLocalFile(item);
-  else openFile(item);
+  if (item.videoPath || item.kind === 'trick' || state.view === 'library' && item.id && !item.path) openTrick(item, time);
+  else if (state.view === 'local' || item.handle) openLocalFile(item, time);
+  else openFile(item, time);
 }
 function playRelative(step) {
   const list = currentList();
@@ -2111,19 +2122,76 @@ function bindVideoResize() {
   const box = $('detailVideoBox');
   if (!handle || handle.dataset.bound) return;
   handle.dataset.bound = '1';
-  handle.addEventListener('mousedown', (event) => {
+  handle.addEventListener('pointerdown', (event) => {
+    if (event.button != null && event.button !== 0) return;
     event.preventDefault();
+    handle.setPointerCapture(event.pointerId);
     const startY = event.clientY;
     const startH = box.offsetHeight;
-    const onMove = (ev) => { box.style.height = Math.max(200, startH + ev.clientY - startY) + 'px'; };
-    const onUp = () => {
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
+    const minH = window.matchMedia('(max-width: 900px)').matches ? 140 : 200;
+    const onMove = (ev) => {
+      const next = Math.max(minH, Math.min(Math.round(window.innerHeight * 0.85), startH + ev.clientY - startY));
+      box.style.height = next + 'px';
+    };
+    const onUp = (ev) => {
+      handle.releasePointerCapture(ev.pointerId);
+      handle.removeEventListener('pointermove', onMove);
+      handle.removeEventListener('pointerup', onUp);
+      handle.removeEventListener('pointercancel', onUp);
       localStorage.setItem('tv2-video-height', box.offsetHeight);
     };
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
+    handle.addEventListener('pointermove', onMove);
+    handle.addEventListener('pointerup', onUp);
+    handle.addEventListener('pointercancel', onUp);
   });
+}
+function isMobileLayout() {
+  return window.matchMedia('(max-width: 900px)').matches;
+}
+function closeMobileNav() {
+  $('app').classList.remove('nav-open');
+  const tip = $('navBackdrop');
+  if (tip) tip.setAttribute('aria-hidden', 'true');
+}
+function syncMobileNavA11y() {
+  const open = $('app').classList.contains('nav-open');
+  const tip = $('navBackdrop');
+  if (tip) tip.setAttribute('aria-hidden', open ? 'false' : 'true');
+}
+function bindMobileNavGestures() {
+  const app = $('app');
+  const edge = 28;
+  let startX = 0;
+  let startY = 0;
+  let mode = '';
+  document.addEventListener('touchstart', (event) => {
+    if (!isMobileLayout() || event.touches.length !== 1) return;
+    if (!$('douyinOverlay').hidden) return;
+    const t = event.touches[0];
+    startX = t.clientX;
+    startY = t.clientY;
+    if (app.classList.contains('nav-open')) {
+      const side = $('side');
+      const onSide = side && t.clientX <= side.getBoundingClientRect().right;
+      mode = onSide ? 'close' : '';
+      return;
+    }
+    mode = startX <= edge ? 'open' : '';
+  }, { passive: true });
+  document.addEventListener('touchend', (event) => {
+    if (!mode || !isMobileLayout()) { mode = ''; return; }
+    const t = event.changedTouches[0];
+    const dx = t.clientX - startX;
+    const dy = t.clientY - startY;
+    const current = mode;
+    mode = '';
+    if (Math.abs(dx) < 36 || Math.abs(dx) < Math.abs(dy) * 1.1) return;
+    if (current === 'open' && dx > 0) {
+      app.classList.add('nav-open');
+      syncMobileNavA11y();
+    }
+    if (current === 'close' && dx < 0) closeMobileNav();
+  }, { passive: true });
 }
 function bindTransport() {
   const video = $('video');
@@ -2140,14 +2208,160 @@ function bindTransport() {
   };
   video.addEventListener('ratechange', sync);
 }
-let douyinObserver = null;
-function leaveDouyin() {
-  if (douyinObserver) { douyinObserver.disconnect(); douyinObserver = null; }
-  $('douyinFeed').querySelectorAll('video').forEach((vid) => { vid.pause(); vid.removeAttribute('src'); });
-  $('douyinFeed').innerHTML = '';
-  $('douyinOverlay').classList.remove('ui-hidden');
-  $('douyinOverlay').hidden = true;
+let douyinItems = [];
+let douyinIndex = 0;
+let douyinLock = false;
+let douyinScrollTimer = 0;
+let douyinOnScroll = null;
+let douyinOnScrollEnd = null;
+
+function douyinMediaUrl(item) {
+  if (!item) return '';
+  if (item.videoPath) return item.videoPath;
+  if (item.path) return '/api/play?' + qs({ path: item.path });
+  return '';
+}
+function clearDouyinVideo(vid) {
+  if (!vid) return;
+  vid.pause();
+  vid.removeAttribute('src');
+  vid.removeAttribute('data-src');
+  try { vid.load(); } catch { /* ok */ }
+}
+function bindDouyinVideo(vid, item, play) {
+  const src = douyinMediaUrl(item);
+  if (!src) {
+    clearDouyinVideo(vid);
+    return;
+  }
+  if (vid.dataset.src !== src) {
+    vid.dataset.src = src;
+    vid.preload = play ? 'auto' : 'metadata';
+    vid.src = src;
+  }
+  vid.loop = true;
+  vid.playbackRate = 1;
+  if (play) vid.play().catch(() => {});
+  else vid.pause();
+}
+function makeDouyinSlide() {
+  const slide = document.createElement('div');
+  slide.className = 'douyin-slide';
+  const vid = document.createElement('video');
+  vid.playsInline = true;
+  vid.setAttribute('playsinline', '');
+  vid.setAttribute('webkit-playsinline', '');
+  vid.preload = 'none';
+  vid.loop = true;
+  const speed = document.createElement('button');
+  speed.type = 'button';
+  speed.className = 'douyin-speed-btn';
+  speed.textContent = '1x';
+  speed.title = '1x / 2x';
+  const meta = document.createElement('div');
+  meta.className = 'douyin-meta';
+  meta.innerHTML = '<div class="douyin-progress"><i><b></b></i></div><div class="douyin-name"></div>';
+  let barRaf = 0;
+  vid.addEventListener('timeupdate', () => {
+    if (barRaf) return;
+    barRaf = requestAnimationFrame(() => {
+      barRaf = 0;
+      const bar = slide.querySelector('.douyin-progress b');
+      if (bar) bar.style.width = vid.duration ? ((vid.currentTime / vid.duration) * 100) + '%' : '0%';
+    });
+  });
+  slide.append(vid, speed, meta);
+  return slide;
+}
+function paintDouyinSlide(slide, item, play) {
+  const vid = slide.querySelector('video');
+  const speed = slide.querySelector('.douyin-speed-btn');
+  const name = slide.querySelector('.douyin-name');
+  const bar = slide.querySelector('.douyin-progress b');
+  slide.classList.toggle('empty', !item);
+  if (name) name.textContent = item ? (item.name || '') : '';
+  if (bar) bar.style.width = '0%';
+  if (speed) {
+    speed.textContent = '1x';
+    speed.classList.remove('on');
+    speed.hidden = !item;
+  }
+  bindDouyinVideo(vid, item, play);
+}
+function douyinPageHeight() {
+  return $('douyinFeed')?.clientHeight || window.innerHeight || 1;
+}
+function centerDouyinFeed() {
+  const feed = $('douyinFeed');
+  if (!feed) return;
+  douyinLock = true;
+  feed.scrollTop = douyinPageHeight();
+  requestAnimationFrame(() => { douyinLock = false; });
+}
+function fillDouyinWindow(index) {
+  douyinIndex = Math.max(0, Math.min(douyinItems.length - 1, index));
+  const feed = $('douyinFeed');
+  if (!feed || feed.children.length < 3) return;
+  const prev = douyinItems[douyinIndex - 1] || null;
+  const cur = douyinItems[douyinIndex] || null;
+  const next = douyinItems[douyinIndex + 1] || null;
+  paintDouyinSlide(feed.children[0], prev, false);
+  paintDouyinSlide(feed.children[1], cur, true);
+  paintDouyinSlide(feed.children[2], next, false);
+}
+function settleDouyinScroll() {
+  if (douyinLock || $('douyinOverlay').hidden) return;
+  const feed = $('douyinFeed');
+  const h = douyinPageHeight();
+  if (!feed || h < 8) return;
+  const page = Math.round(feed.scrollTop / h);
+  if (page === 1) return;
+  if (page <= 0) {
+    if (douyinIndex <= 0) {
+      douyinLock = true;
+      feed.scrollTo({ top: h, behavior: 'smooth' });
+      setTimeout(() => { douyinLock = false; }, 220);
+      return;
+    }
+    fillDouyinWindow(douyinIndex - 1);
+    centerDouyinFeed();
+    return;
+  }
+  if (page >= 2) {
+    if (douyinIndex >= douyinItems.length - 1) {
+      douyinLock = true;
+      feed.scrollTo({ top: h, behavior: 'smooth' });
+      setTimeout(() => { douyinLock = false; }, 220);
+      return;
+    }
+    fillDouyinWindow(douyinIndex + 1);
+    centerDouyinFeed();
+  }
+}
+function leaveDouyin(opts = {}) {
+  const feed = $('douyinFeed');
+  const item = opts.sync ? douyinItems[douyinIndex] : null;
+  const mid = feed?.children?.[1]?.querySelector('video');
+  const time = opts.sync && mid && Number.isFinite(mid.currentTime) ? mid.currentTime : 0;
+
+  const overlay = $('douyinOverlay');
+  overlay.hidden = true;
+  overlay.classList.remove('ui-hidden');
   $('douyinBtn').classList.remove('on');
+  if (feed && douyinOnScroll) feed.removeEventListener('scroll', douyinOnScroll);
+  if (feed && douyinOnScrollEnd) feed.removeEventListener('scrollend', douyinOnScrollEnd);
+  douyinOnScroll = null;
+  douyinOnScrollEnd = null;
+  clearTimeout(douyinScrollTimer);
+  douyinItems = [];
+  douyinIndex = 0;
+  if (feed) feed.onclick = null;
+  requestAnimationFrame(() => {
+    if (!feed) return;
+    feed.querySelectorAll('video').forEach(clearDouyinVideo);
+    feed.innerHTML = '';
+  });
+  if (item) openListItem(item, time);
 }
 function enterDouyin() {
   const list = currentList().filter((item) => item.type !== 'image');
@@ -2155,71 +2369,68 @@ function enterDouyin() {
   const key = state.player ? (state.player.kind === 'trick' ? state.player.id : state.player.path || state.player.key) : '';
   let start = list.findIndex((item) => (item.id || item.path || item.key) === key);
   if (start < 0) start = 0;
-  const feed = $('douyinFeed');
-  feed.innerHTML = '';
-  list.forEach((item, index) => {
-    const slide = document.createElement('div');
-    slide.className = 'douyin-slide';
-    const vid = document.createElement('video');
-    vid.playsInline = true;
-    vid.preload = index === start ? 'auto' : 'none';
-    vid.loop = true;
-    if (item.videoPath) vid.src = item.videoPath;
-    else if (item.path) vid.src = '/api/play?' + qs({ path: item.path });
-    const speed = document.createElement('button');
-    speed.type = 'button';
-    speed.className = 'douyin-speed-btn';
-    speed.textContent = '1x';
-    speed.title = '1x / 2x';
-    speed.onclick = (event) => {
-      event.stopPropagation();
-      const next = vid.playbackRate === 2 ? 1 : 2;
-      vid.playbackRate = next;
-      speed.textContent = next === 2 ? '2x' : '1x';
-      speed.classList.toggle('on', next === 2);
-      if (vid.paused) vid.play().catch(() => {});
-    };
-    const meta = document.createElement('div');
-    meta.className = 'douyin-meta';
-    meta.innerHTML = `<div class="douyin-progress"><i><b></b></i></div><div class="douyin-name">${esc(item.name || '')}</div>`;
-    const bar = meta.querySelector('b');
-    const track = meta.querySelector('.douyin-progress');
-    vid.addEventListener('timeupdate', () => {
-      bar.style.width = vid.duration ? ((vid.currentTime / vid.duration) * 100) + '%' : '0%';
-    });
-    track.onclick = (event) => {
-      event.stopPropagation();
-      const rect = track.getBoundingClientRect();
-      const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
-      if (vid.duration) vid.currentTime = ratio * vid.duration;
-    };
-    slide.addEventListener('click', (event) => {
-      if (event.target.closest('.douyin-speed-btn, .douyin-progress')) return;
-      const rect = slide.getBoundingClientRect();
-      const x = (event.clientX - rect.left) / rect.width;
-      if (x > 0.33 && x < 0.67) {
-        if (vid.paused) vid.play().catch(() => {});
-        else vid.pause();
-      } else $('douyinOverlay').classList.toggle('ui-hidden');
-    });
-    slide.append(vid, speed, meta);
-    feed.appendChild(slide);
-  });
+
+  $('video').pause();
   $('douyinOverlay').classList.remove('ui-hidden');
   $('douyinOverlay').hidden = false;
   $('douyinBtn').classList.add('on');
-  douyinObserver = new IntersectionObserver((entries) => {
-    for (const entry of entries) {
-      const vid = entry.target.querySelector('video');
-      if (!vid) continue;
-      if (entry.isIntersecting && entry.intersectionRatio >= 0.6) vid.play().catch(() => {});
-      else { vid.pause(); vid.playbackRate = 1; const btn = entry.target.querySelector('.douyin-speed-btn'); if (btn) { btn.textContent = '1x'; btn.classList.remove('on'); } }
+
+  const feed = $('douyinFeed');
+  if (douyinOnScroll) feed.removeEventListener('scroll', douyinOnScroll);
+  if (douyinOnScrollEnd) feed.removeEventListener('scrollend', douyinOnScrollEnd);
+  clearTimeout(douyinScrollTimer);
+  feed.innerHTML = '';
+  douyinItems = list;
+
+  // Fixed 3-slot scroller: recycle on settle so phones never hold N decoders.
+  feed.append(makeDouyinSlide(), makeDouyinSlide(), makeDouyinSlide());
+  feed.onclick = (event) => {
+    const slide = event.target.closest('.douyin-slide');
+    if (!slide || slide.classList.contains('empty')) return;
+    if (event.target.closest('.douyin-speed-btn')) {
+      event.stopPropagation();
+      const vid = slide.querySelector('video');
+      if (!vid || !vid.src) return;
+      const btn = slide.querySelector('.douyin-speed-btn');
+      const next = vid.playbackRate === 2 ? 1 : 2;
+      vid.playbackRate = next;
+      if (btn) {
+        btn.textContent = next === 2 ? '2x' : '1x';
+        btn.classList.toggle('on', next === 2);
+      }
+      if (vid.paused) vid.play().catch(() => {});
+      return;
     }
-  }, { root: feed, threshold: [0.6] });
-  [...feed.children].forEach((slide) => douyinObserver.observe(slide));
-  const slide = feed.children[start];
-  if (slide) slide.scrollIntoView();
-  $('video').pause();
+    if (event.target.closest('.douyin-progress')) {
+      event.stopPropagation();
+      const vid = slide.querySelector('video');
+      const track = slide.querySelector('.douyin-progress');
+      if (!vid || !vid.duration || !track) return;
+      const rect = track.getBoundingClientRect();
+      const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+      vid.currentTime = ratio * vid.duration;
+      return;
+    }
+    const rect = slide.getBoundingClientRect();
+    const x = (event.clientX - rect.left) / rect.width;
+    if (x > 0.33 && x < 0.67) {
+      const vid = slide.querySelector('video');
+      if (!vid || !vid.src) return;
+      if (vid.paused) vid.play().catch(() => {});
+      else vid.pause();
+    } else $('douyinOverlay').classList.toggle('ui-hidden');
+  };
+  douyinOnScroll = () => {
+    if (douyinLock) return;
+    clearTimeout(douyinScrollTimer);
+    douyinScrollTimer = setTimeout(settleDouyinScroll, 90);
+  };
+  douyinOnScrollEnd = () => settleDouyinScroll();
+  feed.addEventListener('scroll', douyinOnScroll, { passive: true });
+  feed.addEventListener('scrollend', douyinOnScrollEnd);
+
+  fillDouyinWindow(start);
+  centerDouyinFeed();
 }
 function videoAreaFullscreen() {
   const box = $('detailVideoBox');
@@ -2242,10 +2453,12 @@ function toggleVideoAreaFullscreen() {
   box.requestFullscreen().catch(() => {});
 }
 function wire() {
-  $('menuBtn').onclick = () => {
+  $('menuBtn').onclick = (event) => {
+    event.stopPropagation();
     const app = $('app');
-    if (window.matchMedia('(max-width: 900px)').matches) {
+    if (isMobileLayout()) {
       app.classList.toggle('nav-open');
+      syncMobileNavA11y();
       return;
     }
     const next = !app.classList.contains('collapsed');
@@ -2254,12 +2467,24 @@ function wire() {
     $('menuBtn').title = next ? '展开侧栏' : '收起侧栏';
     $('menuBtn').setAttribute('aria-label', $('menuBtn').title);
   };
-  if (localStorage.getItem('tv2-side-collapsed') === '1' && !window.matchMedia('(max-width: 900px)').matches) {
+  if (localStorage.getItem('tv2-side-collapsed') === '1' && !isMobileLayout()) {
     $('app').classList.add('collapsed');
     $('menuBtn').title = '展开侧栏';
     $('menuBtn').setAttribute('aria-label', '展开侧栏');
   }
-  $('main').onclick = () => $('app').classList.remove('nav-open');
+  $('navBackdrop').onclick = () => closeMobileNav();
+  $('main').addEventListener('click', () => closeMobileNav());
+  bindMobileNavGestures();
+  let topChromeRaf = 0;
+  $('main').addEventListener('scroll', () => {
+    if (topChromeRaf) return;
+    topChromeRaf = requestAnimationFrame(() => {
+      topChromeRaf = 0;
+      syncTopChrome();
+    });
+  }, { passive: true });
+  window.addEventListener('resize', () => syncTopChrome());
+  syncTopChrome();
   $('modeBtn').onclick = (event) => {
     event.stopPropagation();
     $('modeDrop').hidden = !$('modeDrop').hidden;
@@ -2409,11 +2634,23 @@ function wire() {
       return;
     }
     const folder = event.target.closest('[data-folder]');
-    if (folder) selectFolder(folder.dataset.folder).catch((err) => toast(err.message));
+    if (folder) {
+      closeMobileNav();
+      selectFolder(folder.dataset.folder).catch((err) => toast(err.message));
+    }
     const cat = event.target.closest('[data-cat]');
-    if (cat && state.view === 'library') { state.category = cat.dataset.cat; loadLibrary().catch((err) => toast(err.message)); }
+    if (cat && state.view === 'library') {
+      closeMobileNav();
+      state.category = cat.dataset.cat;
+      loadLibrary().catch((err) => toast(err.message));
+    }
     const localFolder = event.target.closest('[data-local]');
-    if (localFolder) { state.local.folder = localFolder.dataset.local; renderLocalSide(); renderLocalGrid().catch((err) => toast(err.message)); }
+    if (localFolder) {
+      closeMobileNav();
+      state.local.folder = localFolder.dataset.local;
+      renderLocalSide();
+      renderLocalGrid().catch((err) => toast(err.message));
+    }
   };
   $('sideBody').oncontextmenu = (event) => {
     const folder = event.target.closest('[data-folder]');
@@ -2662,7 +2899,7 @@ function wire() {
   bindTransport();
   bindVideoResize();
   $('douyinBtn').onclick = () => enterDouyin();
-  $('douyinClose').onclick = leaveDouyin;
+  $('douyinClose').onclick = () => leaveDouyin({ sync: true });
   $('playerMenuBtn').onclick = (event) => { event.stopPropagation(); playerMore(); };
   $('streamMenuBtn').onclick = (event) => {
     event.stopPropagation();

@@ -1,6 +1,6 @@
 {
   "name": "tricks-video-2",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Tricks Video 2 — a calmer local video library whose file operations do not stay locked",
   "author": "Tricks",
   "main": "electron/main.js",
@@ -23,6 +23,7 @@
     "systray": "^1.0.5"
   },
   "devDependencies": {
+    "@yao-pkg/pkg": "^6.14.2",
     "electron": "^33.2.1",
     "electron-builder": "^25.1.8",
     "png-to-ico": "^3.0.2"
