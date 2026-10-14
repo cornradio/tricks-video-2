@@ -1,0 +1,98 @@
+{
+  "name": "tricks-video-2",
+  "version": "2.0.0",
+  "description": "Tricks Video 2 — a calmer local video library whose file operations do not stay locked",
+  "author": "Tricks",
+  "main": "electron/main.js",
+  "bin": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "check:files": "node scripts/file-ops-check.js",
+    "pack": "node pack.js",
+    "build:exe": "node build-exe.js",
+    "build:electron": "node build-electron.js",
+    "build:all": "node build-all.js",
+    "deploy": "node deploy.js --pack",
+    "electron": "electron ."
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "multer": "^1.4.5-lts.2"
+  },
+  "optionalDependencies": {
+    "systray": "^1.0.5"
+  },
+  "devDependencies": {
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
+    "png-to-ico": "^3.0.2"
+  },
+  "pkg": {
+    "assets": [
+      "public/**/*",
+      "lib/**/*",
+      "node_modules/systray/traybin/tray_windows_release.exe"
+    ],
+    "scripts": [
+      "lib/**/*.js"
+    ],
+    "targets": [
+      "node18-win-x64"
+    ],
+    "outputPath": "dist"
+  },
+  "build": {
+    "appId": "com.tricks.video2",
+    "productName": "Tricks Video 2",
+    "electronDownload": {
+      "mirror": "https://npmmirror.com/mirrors/electron/"
+    },
+    "electronDist": "node_modules/electron/dist",
+    "directories": {
+      "output": "dist/electron",
+      "buildResources": "build"
+    },
+    "icon": "build/icon.ico",
+    "files": [
+      "electron/**/*",
+      "server.js",
+      "lib/**/*",
+      "public/**/*",
+      "build/icon.ico",
+      "build/icon.png",
+      "package.json",
+      "node_modules/express/**/*",
+      "node_modules/multer/**/*",
+      "node_modules/systray/**/*",
+      "!node_modules/systray/traybin/*darwin*",
+      "!node_modules/systray/traybin/*linux*"
+    ],
+    "extraResources": [],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "TricksVideo2-${version}-${os}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false
+    },
+    "portable": {
+      "artifactName": "TricksVideo2-${version}-portable.exe"
+    }
+  }
+}

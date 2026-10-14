@@ -1,0 +1,4 @@
+# 复制为 data/whitelist.txt 后才会限制可访问的目录。
+# 没有这个文件时，本机任意路径都能打开。
+# D:\Videos
+# \\192.168.1.1\Share\movies

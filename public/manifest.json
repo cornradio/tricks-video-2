@@ -1,0 +1,12 @@
+{
+  "name": "Tricks Video 2",
+  "short_name": "Tricks",
+  "description": "A calmer local video library",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#1a1612",
+  "theme_color": "#1a1612",
+  "icons": [
+    { "src": "/favicon.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

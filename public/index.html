@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-mode="dark" data-accent="ember">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1a1612">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Tricks Video">
+<title>Tricks Video 2</title>
+<link rel="icon" href="/favicon.png">
+<link rel="apple-touch-icon" href="/favicon.png">
+<link rel="manifest" href="/manifest.json">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,560;9..144,680&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css">
+<script>
+try {
+  var oldTheme = localStorage.getItem('tv2-theme') || '';
+  var mode = localStorage.getItem('tv2-mode');
+  var accent = localStorage.getItem('tv2-accent');
+  var lightThemes = { paper: 1, blossom: 1, moss: 1, linen: 1, snow: 1 };
+  var accentOf = { hearth: 'ember', paper: 'ember' };
+  var known = { ember: 1, hub: 1, youtube: 1, google: 1, twitter: 1, microsoft: 1 };
+  if (!mode) mode = lightThemes[oldTheme] ? 'light' : 'dark';
+  if (!accent) accent = accentOf[oldTheme] || 'ember';
+  if (!known[accent]) accent = 'ember';
+  document.documentElement.setAttribute('data-mode', mode);
+  document.documentElement.setAttribute('data-accent', accent);
+} catch (e) {}
+</script>
+</head>
+<body>
+<div class="app" id="app" data-view="browse">
+  <header class="top">
+    <button class="icon-btn" id="menuBtn" type="button" title="收起侧栏" aria-label="收起侧栏">☰</button>
+    <div class="mode" id="mode">
+      <button class="brand" id="modeBtn" type="button">Tricks <em>Video</em><span class="mode-caret" aria-hidden="true"></span></button>
+      <div class="mode-drop" id="modeDrop" hidden>
+        <button type="button" data-view="browse" class="active">资料库</button>
+        <button type="button" data-view="library">收藏</button>
+        <button type="button" data-view="local">本机</button>
+        <button type="button" data-view="convert">转换</button>
+        <button type="button" data-view="links">资源</button>
+      </div>
+    </div>
+    <label class="search">
+      <input id="search" type="search" placeholder="搜索文件，空格分开多个词" autocomplete="off">
+    </label>
+    <div class="sort-wrap" id="sortSeg">
+      <button type="button" data-sort="name_asc">A-Z</button>
+      <button type="button" data-sort="name_desc">Z-A</button>
+      <button type="button" data-sort="time_desc">新</button>
+      <button type="button" data-sort="time_asc">旧</button>
+      <button type="button" data-sort="recent">最近</button>
+    </div>
+    <button class="icon-btn" id="douyinBtn" type="button" title="抖音模式（上下滑动）"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="2" width="12" height="20" rx="2"/><path d="M12 6v4"/><path d="M9 18h6"/></svg></button>
+    <button class="icon-btn" id="historyBtn" type="button" title="播放历史">历史</button>
+    <button class="icon-btn" id="helpBtn" type="button" title="设置">设置</button>
+    <button class="icon-btn" id="fullBtn" type="button" title="网页全屏">全屏</button>
+    <div class="win-controls" id="winControls" hidden>
+      <button type="button" id="winMin" title="最小化" aria-label="最小化"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6h8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button>
+      <button type="button" id="winMax" title="最大化" aria-label="最大化"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="1.5" y="1.5" width="9" height="9" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></button>
+      <button type="button" id="winClose" title="关闭" aria-label="关闭"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button>
+    </div>
+  </header>
+
+  <aside class="side" id="side">
+    <div class="side-head">
+      <span id="sideTitle">文件夹</span>
+      <button class="text-btn" id="sideAdd" type="button">新建</button>
+    </div>
+    <div id="sideBody" class="side-body"></div>
+  </aside>
+
+  <main class="main" id="main">
+    <section id="panel-browse" data-view-panel="browse">
+      <div class="browse-switch" id="browseSwitch">
+        <div class="workspace" id="workspace">
+          <button class="workspace-btn" id="workspaceBtn" type="button" title="最近打开的文件夹">
+            <svg class="workspace-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7h6l2 2h10v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/><path d="M3 7V5a2 2 0 0 1 2-2h4l2 2h2"/></svg>
+            <span class="workspace-label" id="workspaceLabel">打开文件夹</span>
+            <span class="workspace-caret" aria-hidden="true"></span>
+          </button>
+          <div class="workspace-drop" id="workspaceDrop" hidden>
+            <div class="workspace-drop-head">最近打开</div>
+            <div id="workspaceList" class="workspace-list"></div>
+            <button type="button" class="workspace-add" id="workspaceAdd">打开新文件夹…</button>
+            <div class="workspace-new" id="workspaceNew" hidden>
+              <input id="workspaceNewInput" placeholder="例如 D:\Videos 或 \\nas\movies" autocomplete="off">
+              <button class="solid-btn" id="workspaceNewOk" type="button">打开</button>
+            </div>
+          </div>
+        </div>
+        <div class="workspace-path" id="workspacePathRow">
+          <input id="pathInput" placeholder="例如 D:\Videos 或 \\nas\movies" autocomplete="off">
+          <button class="solid-btn" id="openPath" type="button">打开</button>
+        </div>
+      </div>
+      <div id="welcome" class="welcome"></div>
+      <div id="browseBody" hidden>
+        <div class="toolbar">
+          <div id="crumbs" class="crumbs"></div>
+          <div class="seg" id="filterSeg">
+            <button type="button" data-filter="all">全部</button>
+            <button type="button" data-filter="video">视频</button>
+            <button type="button" data-filter="image">图片</button>
+          </div>
+          <button class="text-btn" id="cardPrefsBtn" type="button">卡片设置</button>
+          <button class="text-btn" id="refreshCovers" type="button">刷新封面</button>
+          <button class="text-btn" id="uploadBtn" type="button">上传</button>
+          <input id="uploadInput" type="file" accept="video/*,image/*" multiple hidden>
+        </div>
+        <div id="folderHead" class="folder-head"></div>
+        <div id="grid" class="grid"></div>
+      </div>
+    </section>
+
+    <section id="panel-library" data-view-panel="library" hidden>
+      <div class="toolbar">
+        <h2 class="panel-title">收藏库</h2>
+        <button class="text-btn" id="trickUploadBtn" type="button">上传视频</button>
+        <input id="trickUploadInput" type="file" accept="video/*,image/gif" hidden>
+      </div>
+      <div id="trickGrid" class="grid"></div>
+    </section>
+
+    <section id="panel-local" data-view-panel="local" hidden>
+      <div id="localGate" class="welcome"></div>
+      <div id="localBody" hidden>
+        <div class="toolbar">
+          <div id="localCrumbs" class="crumbs"></div>
+          <button class="text-btn" id="localReselect" type="button">换一个文件夹</button>
+        </div>
+        <div id="localGrid" class="grid"></div>
+      </div>
+    </section>
+
+    <section id="panel-convert" data-view-panel="convert" hidden>
+      <div class="sheet">
+        <h2 class="panel-title">转换</h2>
+        <div class="seg" id="convertTabs">
+          <button type="button" data-tab="extract" class="active">提取字幕</button>
+          <button type="button" data-tab="merge">合并字幕</button>
+          <button type="button" data-tab="single">单集转换</button>
+          <button type="button" data-tab="folder">文件夹转换</button>
+          <button type="button" data-tab="batch">批量 MKV</button>
+        </div>
+        <div id="convertForm"></div>
+        <div id="convertLog" class="log"></div>
+      </div>
+    </section>
+
+    <section id="panel-links" data-view-panel="links" hidden>
+      <div class="sheet" id="linksSheet"></div>
+    </section>
+
+    <section id="player" class="player" hidden>
+      <header class="detail-top">
+        <button class="text-btn" id="backBtn" type="button">返回</button>
+        <div class="stream-menu" id="streamMenu">
+          <button class="text-btn" id="streamMenuBtn" type="button">流式播放</button>
+          <div class="stream-drop" id="streamDrop" hidden>
+            <button type="button" id="streamCopy">复制地址</button>
+            <button type="button" id="streamOpen">打开地址</button>
+            <div class="stream-row"><button type="button" data-player="mpv">MPV 打开</button><a href="https://mpv.io/" target="_blank" rel="noopener">下载</a><button type="button" data-pin="mpv">钉住</button></div>
+            <div class="stream-row"><button type="button" data-player="iina">IINA 打开</button><a href="https://iina.io/" target="_blank" rel="noopener">下载</a><button type="button" data-pin="iina">钉住</button></div>
+            <div class="stream-row"><button type="button" data-player="vlc">VLC 打开</button><a href="https://www.videolan.org/vlc/" target="_blank" rel="noopener">下载</a><button type="button" data-pin="vlc">钉住</button></div>
+            <div class="stream-row"><button type="button" data-player="potplayer">PotPlayer 打开</button><a href="https://potplayer.daum.net/" target="_blank" rel="noopener">下载</a><button type="button" data-pin="potplayer">钉住</button></div>
+          </div>
+        </div>
+        <button class="text-btn" id="streamPinned" type="button" hidden></button>
+        <button class="ctrl-btn" id="downloadBtn" type="button" title="下载"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button>
+        <button class="ctrl-btn danger" id="detailDelete" type="button" title="删除"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg></button>
+        <span class="detail-spacer"></span>
+        <span id="navInfo" class="sub"></span>
+        <button class="ctrl-btn" id="repeatBtn" type="button" title="单曲循环 / 顺序播放"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 014-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 01-4 4H3"/></svg></button>
+        <button class="ctrl-btn" id="shuffleBtn" type="button" title="随机：下一个随机，上一个可回退"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg></button>
+        <button class="text-btn" id="prevBtn" type="button" title="上一个">上一个</button>
+        <button class="text-btn" id="nextBtn" type="button" title="下一个">下一个</button>
+        <button class="ctrl-btn" id="playerMenuBtn" type="button" title="更多">⋯</button>
+      </header>
+      <div class="detail-video" id="detailVideoBox">
+        <video id="video" controls controlsList="nofullscreen" playsinline></video>
+        <img id="still" alt="" hidden>
+        <div id="subOverlay" class="sub-overlay"></div>
+        <select id="subSelect" class="sub-select" hidden></select>
+      </div>
+      <div class="video-resize-handle" id="videoResizeHandle" title="拖动调整高度"></div>
+      <div class="detail-name">
+        <span class="detail-drag" id="detailDrag" draggable="true" title="拖到左侧文件夹以移动">⧉</span>
+        <h2 id="playerTitle"></h2>
+        <button class="ctrl-btn" id="notesBtn" type="button" title="备注"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></button>
+        <button class="ctrl-btn" id="clipsToggleBtn" type="button" title="片段"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="2"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/></svg></button>
+        <button class="ctrl-btn" id="shotBtn" type="button" title="截图"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/><circle cx="12" cy="13" r="4"/></svg></button>
+        <button class="ctrl-btn" id="rateBtn" type="button" title="一倍速 / 二倍速">1x</button>
+        <span class="ctrl-label" id="playTimeLabel">0:00 / 0:00</span>
+      </div>
+      <div id="detailTags" class="detail-tags"></div>
+      <div id="speedIndicator" hidden>2x 倍速</div>
+      <section class="notes-section" id="notesSection">
+        <div class="notes-head"><span>备注</span></div>
+        <textarea id="notes" placeholder="给这个视频写点备注…"></textarea>
+      </section>
+      <section class="clips-section" id="clipsSection">
+        <div class="clips-head">
+          <span>片段标记</span>
+          <div class="clip-row">
+            <button class="ctrl-btn" id="markA" type="button" title="起点">A</button>
+            <span id="markAVal">—</span>
+            <button class="ctrl-btn" id="markB" type="button" title="终点">B</button>
+            <span id="markBVal">—</span>
+            <button class="solid-btn" id="saveClip" type="button">保存片段</button>
+          </div>
+        </div>
+        <div id="clipList" class="clip-list"></div>
+      </section>
+    </section>
+  </main>
+</div>
+
+<div id="historyPop" class="history-panel" hidden></div>
+<div id="helpPop" class="pop pop-wide" hidden></div>
+<div id="cardPrefsPop" class="pop pop-wide" hidden></div>
+<div id="ctx" class="ctx" hidden></div>
+<div id="modal" class="modal-back" hidden></div>
+<div id="dock" class="dock" hidden></div>
+<div id="hoverPreview" class="hover-preview" hidden>
+  <div id="hoverShell" class="hover-shell">
+    <video id="hoverVideo" playsinline muted preload="auto" loop></video>
+    <div id="hoverHint" class="hover-hint" hidden></div>
+    <div class="hover-tools">
+      <button id="hoverSound" type="button">声音关 M</button>
+      <button id="hoverContinue" type="button">视频打开 O</button>
+    </div>
+    <div id="hoverScrub" class="hover-scrub"><i><b id="hoverBuf"></b><b id="hoverFill"></b></i></div>
+  </div>
+</div>
+<div id="snapPreview" class="snap-modal" hidden>
+  <div class="snap-box">
+    <button id="snapClose" type="button" title="关闭">×</button>
+    <img id="snapImg" alt="截图">
+    <div class="snap-actions">
+      <button id="snapPrev" type="button">上一帧</button>
+      <span id="snapMeta"></span>
+      <button id="snapSave" type="button">下载</button>
+      <button id="snapNext" type="button">下一帧</button>
+    </div>
+  </div>
+</div>
+<div id="toast" class="toast"></div>
+<div id="douyinOverlay" hidden>
+  <button id="douyinClose" type="button" title="退出">×</button>
+  <div id="douyinHint">中间暂停 · 两侧隐藏界面 · 上下滑动</div>
+  <div id="douyinFeed"></div>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>

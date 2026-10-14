@@ -1,0 +1,10 @@
+node_modules/
+data/
+uploads/
+*.log
+sample-library/
+dist/
+release/
+out/
+.pkg-cache/
+*.zip
