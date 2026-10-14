@@ -2325,9 +2325,12 @@ function bindTransport() {
 let douyinItems = [];
 let douyinIndex = 0;
 let douyinLock = false;
+let douyinStepLock = false;
 let douyinScrollTimer = 0;
+let douyinUnlockTimer = 0;
 let douyinOnScroll = null;
 let douyinOnScrollEnd = null;
+let douyinOnWheel = null;
 
 function douyinMediaUrl(item) {
   if (!item) return '';
@@ -2405,51 +2408,62 @@ function paintDouyinSlide(slide, item, play) {
 function douyinPageHeight() {
   return $('douyinFeed')?.clientHeight || window.innerHeight || 1;
 }
+function lockDouyin(ms = 160) {
+  douyinLock = true;
+  clearTimeout(douyinUnlockTimer);
+  douyinUnlockTimer = setTimeout(() => { douyinLock = false; }, ms);
+}
 function centerDouyinFeed() {
   const feed = $('douyinFeed');
   if (!feed) return;
-  douyinLock = true;
+  lockDouyin(180);
   feed.scrollTop = douyinPageHeight();
-  requestAnimationFrame(() => { douyinLock = false; });
 }
 function fillDouyinWindow(index) {
-  douyinIndex = Math.max(0, Math.min(douyinItems.length - 1, index));
+  const n = douyinItems.length;
   const feed = $('douyinFeed');
-  if (!feed || feed.children.length < 3) return;
-  const prev = douyinItems[douyinIndex - 1] || null;
+  if (!feed || feed.children.length < 3 || !n) return;
+  douyinIndex = ((index % n) + n) % n;
   const cur = douyinItems[douyinIndex] || null;
-  const next = douyinItems[douyinIndex + 1] || null;
+  // Loop: last's next is first, first's prev is last.
+  const prev = n > 1 ? douyinItems[(douyinIndex - 1 + n) % n] : null;
+  const next = n > 1 ? douyinItems[(douyinIndex + 1) % n] : null;
   paintDouyinSlide(feed.children[0], prev, false);
   paintDouyinSlide(feed.children[1], cur, true);
   paintDouyinSlide(feed.children[2], next, false);
 }
+function stepDouyin(dir) {
+  if (douyinLock || douyinStepLock || $('douyinOverlay').hidden) return false;
+  const n = douyinItems.length;
+  if (n <= 1) {
+    centerDouyinFeed();
+    return false;
+  }
+  douyinStepLock = true;
+  fillDouyinWindow(douyinIndex + dir);
+  centerDouyinFeed();
+  setTimeout(() => { douyinStepLock = false; }, 320);
+  return true;
+}
 function settleDouyinScroll() {
-  if (douyinLock || $('douyinOverlay').hidden) return;
+  if (douyinLock || douyinStepLock || $('douyinOverlay').hidden) return;
   const feed = $('douyinFeed');
   const h = douyinPageHeight();
   if (!feed || h < 8) return;
   const page = Math.round(feed.scrollTop / h);
   if (page === 1) return;
   if (page <= 0) {
-    if (douyinIndex <= 0) {
-      douyinLock = true;
+    if (!stepDouyin(-1)) {
+      lockDouyin(220);
       feed.scrollTo({ top: h, behavior: 'smooth' });
-      setTimeout(() => { douyinLock = false; }, 220);
-      return;
     }
-    fillDouyinWindow(douyinIndex - 1);
-    centerDouyinFeed();
     return;
   }
   if (page >= 2) {
-    if (douyinIndex >= douyinItems.length - 1) {
-      douyinLock = true;
+    if (!stepDouyin(1)) {
+      lockDouyin(220);
       feed.scrollTo({ top: h, behavior: 'smooth' });
-      setTimeout(() => { douyinLock = false; }, 220);
-      return;
     }
-    fillDouyinWindow(douyinIndex + 1);
-    centerDouyinFeed();
   }
 }
 function leaveDouyin(opts = {}) {
@@ -2464,9 +2478,14 @@ function leaveDouyin(opts = {}) {
   $('douyinBtn').classList.remove('on');
   if (feed && douyinOnScroll) feed.removeEventListener('scroll', douyinOnScroll);
   if (feed && douyinOnScrollEnd) feed.removeEventListener('scrollend', douyinOnScrollEnd);
+  if (feed && douyinOnWheel) feed.removeEventListener('wheel', douyinOnWheel);
   douyinOnScroll = null;
   douyinOnScrollEnd = null;
+  douyinOnWheel = null;
   clearTimeout(douyinScrollTimer);
+  clearTimeout(douyinUnlockTimer);
+  douyinLock = false;
+  douyinStepLock = false;
   douyinItems = [];
   douyinIndex = 0;
   if (feed) feed.onclick = null;
@@ -2492,7 +2511,11 @@ function enterDouyin() {
   const feed = $('douyinFeed');
   if (douyinOnScroll) feed.removeEventListener('scroll', douyinOnScroll);
   if (douyinOnScrollEnd) feed.removeEventListener('scrollend', douyinOnScrollEnd);
+  if (douyinOnWheel) feed.removeEventListener('wheel', douyinOnWheel);
   clearTimeout(douyinScrollTimer);
+  clearTimeout(douyinUnlockTimer);
+  douyinLock = false;
+  douyinStepLock = false;
   feed.innerHTML = '';
   douyinItems = list;
 
@@ -2534,12 +2557,24 @@ function enterDouyin() {
       else vid.pause();
     } else $('douyinOverlay').classList.toggle('ui-hidden');
   };
-  douyinOnScroll = () => {
-    if (douyinLock) return;
-    clearTimeout(douyinScrollTimer);
-    douyinScrollTimer = setTimeout(settleDouyinScroll, 90);
+  // Wheel: one notch / gesture = exactly one video. Native snap + settle was skipping.
+  douyinOnWheel = (event) => {
+    if (Math.abs(event.deltaY) < Math.abs(event.deltaX)) return;
+    event.preventDefault();
+    if (douyinLock || douyinStepLock) return;
+    if (event.deltaY > 2) stepDouyin(1);
+    else if (event.deltaY < -2) stepDouyin(-1);
   };
-  douyinOnScrollEnd = () => settleDouyinScroll();
+  douyinOnScroll = () => {
+    if (douyinLock || douyinStepLock) return;
+    clearTimeout(douyinScrollTimer);
+    douyinScrollTimer = setTimeout(settleDouyinScroll, 120);
+  };
+  douyinOnScrollEnd = () => {
+    clearTimeout(douyinScrollTimer);
+    settleDouyinScroll();
+  };
+  feed.addEventListener('wheel', douyinOnWheel, { passive: false });
   feed.addEventListener('scroll', douyinOnScroll, { passive: true });
   feed.addEventListener('scrollend', douyinOnScrollEnd);
 
@@ -3018,7 +3053,15 @@ function wire() {
   bindTransport();
   bindVideoResize();
   $('douyinBtn').onclick = () => enterDouyin();
-  $('douyinClose').onclick = () => leaveDouyin({ sync: true });
+  $('douyinClose').onclick = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    leaveDouyin({ sync: true });
+  };
+  // Keep chrome above the feed so mobile taps hit ×, not “hide UI”.
+  $('douyinClose').addEventListener('pointerdown', (event) => {
+    event.stopPropagation();
+  });
   $('playerMenuBtn').onclick = (event) => { event.stopPropagation(); playerMore(); };
   $('streamMenuBtn').onclick = (event) => {
     event.stopPropagation();

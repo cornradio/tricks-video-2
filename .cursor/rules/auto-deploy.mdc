@@ -1,0 +1,14 @@
+---
+description: Deploy to homeserver after every code change
+alwaysApply: true
+---
+
+# Auto deploy
+
+After finishing any code/UI change in this repo (unless the user explicitly says not to deploy):
+
+1. Run `npm run deploy` from the project root.
+2. Confirm success with the URL `http://192.168.31.11:6688/` and HTTP status.
+3. Do not ask whether to deploy — just deploy.
+
+Skip deploy only for pure questions, docs-only notes with no runtime effect, or when the user says not to.
