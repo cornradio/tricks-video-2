@@ -18,13 +18,27 @@ function resolveBase() {
 }
 
 function resolveIcon() {
-  const candidates = [
-    path.join(__dirname, '..', 'build', 'icon.ico'),
-    path.join(__dirname, '..', 'build', 'icon.png'),
-    path.join(__dirname, '..', 'public', 'favicon.png'),
-    path.join(__dirname, '..', 'public', 'tray-icon.ico')
-  ];
+  // macOS Dock/window chrome uses PNG well; .ico is mainly for Windows.
+  const candidates = process.platform === 'darwin'
+    ? [
+        path.join(__dirname, '..', 'build', 'icon.png'),
+        path.join(__dirname, '..', 'public', 'favicon.png'),
+        path.join(__dirname, '..', 'build', 'icon.ico'),
+        path.join(__dirname, '..', 'public', 'tray-icon.ico')
+      ]
+    : [
+        path.join(__dirname, '..', 'build', 'icon.ico'),
+        path.join(__dirname, '..', 'build', 'icon.png'),
+        path.join(__dirname, '..', 'public', 'favicon.png'),
+        path.join(__dirname, '..', 'public', 'tray-icon.ico')
+      ];
   return candidates.find((p) => fs.existsSync(p)) || undefined;
+}
+
+function applyDockIcon() {
+  if (process.platform !== 'darwin' || !app.dock) return;
+  const icon = resolveIcon();
+  if (icon) app.dock.setIcon(icon);
 }
 
 function probePort(port) {
@@ -154,6 +168,7 @@ if (!gotLock) {
     if (process.platform === 'win32' && app.setAppUserModelId) {
       app.setAppUserModelId('com.tricks.video2');
     }
+    applyDockIcon();
     try {
       const port = await startServer();
       createWindow(port);
