@@ -38,12 +38,14 @@ try {
       <button class="brand" id="modeBtn" type="button">Tricks <em>Video</em><span class="mode-caret" aria-hidden="true"></span></button>
       <div class="mode-drop" id="modeDrop" hidden>
         <button type="button" data-view="browse" class="active">资料库</button>
-        <button type="button" data-view="library">收藏</button>
-        <button type="button" data-view="local">本机</button>
         <button type="button" data-view="convert">转换</button>
         <button type="button" data-view="links">资源</button>
+        <button type="button" data-view="help">帮助</button>
       </div>
     </div>
+    <button class="icon-btn filter-toggle" id="filterToggleBtn" type="button" title="搜索与排序" aria-label="搜索与排序" aria-expanded="false">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16l-6 7v5l-4 2v-7L4 5z"/></svg>
+    </button>
     <label class="search">
       <input id="search" type="search" placeholder="搜索文件，空格分开多个词" autocomplete="off">
     </label>
@@ -57,7 +59,7 @@ try {
     <button class="icon-btn" id="douyinBtn" type="button" title="抖音模式（上下滑动）">抖音模式</button>
     <button class="icon-btn" id="historyBtn" type="button" title="播放历史">历史</button>
     <button class="icon-btn" id="helpBtn" type="button" title="设置">设置</button>
-    <button class="icon-btn" id="fullBtn" type="button" title="网页全屏">全屏</button>
+    <button class="icon-btn" id="fullBtn" type="button" title="浏览器全屏（等同 F11）">全屏</button>
     <div class="win-controls" id="winControls" hidden>
       <button type="button" id="winMin" title="最小化" aria-label="最小化"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6h8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button>
       <button type="button" id="winMax" title="最大化" aria-label="最大化"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="1.5" y="1.5" width="9" height="9" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></button>
@@ -139,6 +141,7 @@ try {
     <section id="panel-convert" data-view-panel="convert" hidden>
       <div class="sheet">
         <h2 class="panel-title">转换</h2>
+        <p class="convert-lead">支持 MKV/其他格式转 MP4，也支持 MP4→MP4 修复有问题的封装。开始前会先确认路径，并给出可复制的完整命令。</p>
         <div class="seg" id="convertTabs">
           <button type="button" data-tab="extract" class="active">提取字幕</button>
           <button type="button" data-tab="merge">合并字幕</button>
@@ -147,12 +150,103 @@ try {
           <button type="button" data-tab="batch">批量 MKV</button>
         </div>
         <div id="convertForm"></div>
-        <div id="convertLog" class="log"></div>
+        <div id="convertProgress" class="convert-progress" hidden>
+          <div class="convert-progress-head">
+            <strong id="convertStatus">准备中</strong>
+            <span id="convertPct">0%</span>
+          </div>
+          <div class="bar convert-bar"><span id="convertBar"></span></div>
+          <div class="convert-meta" id="convertMeta"></div>
+          <div class="convert-cmd-wrap">
+            <div class="convert-cmd-top">
+              <span>当前命令</span>
+              <button class="text-btn" id="convertCopyCmd" type="button">复制命令</button>
+            </div>
+            <pre id="convertCmd" class="convert-cmd"></pre>
+          </div>
+          <div id="convertLog" class="log convert-log"></div>
+        </div>
       </div>
     </section>
 
     <section id="panel-links" data-view-panel="links" hidden>
       <div class="sheet" id="linksSheet"></div>
+    </section>
+
+    <section id="panel-help" data-view-panel="help" hidden>
+      <div class="sheet help-page">
+        <h2 class="panel-title">帮助</h2>
+        <p class="help-lead">项目地址、依赖安装，以及它们分别支撑哪些功能。</p>
+
+        <article class="help-card">
+          <h3>GitHub</h3>
+          <p>源码、问题反馈与更新都在这里：</p>
+          <p><a class="help-link" href="https://github.com/cornradio/tricks-video-2/" target="_blank" rel="noopener">https://github.com/cornradio/tricks-video-2/</a></p>
+        </article>
+
+        <article class="help-card">
+          <h3>FFmpeg <span class="help-tag">推荐必装</span></h3>
+          <p class="help-why"><strong>用在哪里：</strong>缩略图 / 封面、播放兼容转封装、视频页「转换画质」、提取 / 合并字幕、截片段与导出 GIF、时长探测（ffprobe）。没有它，浏览与播放会明显受限。</p>
+          <p>官网下载：<a class="help-link" href="https://ffmpeg.org/download.html" target="_blank" rel="noopener">ffmpeg.org/download.html</a></p>
+          <div class="help-install">
+            <div class="help-os">Windows（推荐 winget）</div>
+            <div class="help-cmd-row">
+              <code>winget install Gyan.FFmpeg</code>
+              <button class="text-btn" type="button" data-copy-cmd="winget install Gyan.FFmpeg">复制</button>
+            </div>
+            <div class="help-os">macOS（Homebrew）</div>
+            <div class="help-cmd-row">
+              <code>brew install ffmpeg</code>
+              <button class="text-btn" type="button" data-copy-cmd="brew install ffmpeg">复制</button>
+            </div>
+            <div class="help-os">Linux（Debian / Ubuntu）</div>
+            <div class="help-cmd-row">
+              <code>sudo apt update &amp;&amp; sudo apt install -y ffmpeg</code>
+              <button class="text-btn" type="button" data-copy-cmd="sudo apt update && sudo apt install -y ffmpeg">复制</button>
+            </div>
+          </div>
+          <p class="help-tip">装好后新开一个终端，执行 <code>ffmpeg -version</code> 能输出版本即表示 PATH 已就绪；然后重启本服务。</p>
+        </article>
+
+        <article class="help-card">
+          <h3>HandBrakeCLI <span class="help-tag">转换页需要</span></h3>
+          <p class="help-why"><strong>用在哪里：</strong>「转换」里的单集转换、文件夹转换、批量 MKV→MP4（含 MP4→MP4 修复）。不做转码可以不装；要用这些功能就必须装 <em>HandBrakeCLI</em>（命令行版，不只是图形界面）。</p>
+          <p>官网：<a class="help-link" href="https://handbrake.fr/downloads.php" target="_blank" rel="noopener">handbrake.fr/downloads.php</a>（选 Command Line / CLI）</p>
+          <div class="help-install">
+            <div class="help-os">Windows（winget，含 CLI）</div>
+            <div class="help-cmd-row">
+              <code>winget install HandBrake.HandBrake</code>
+              <button class="text-btn" type="button" data-copy-cmd="winget install HandBrake.HandBrake">复制</button>
+            </div>
+            <div class="help-os">Windows（Scoop，命令行版）</div>
+            <div class="help-cmd-row">
+              <code>scoop install handbrake-cli</code>
+              <button class="text-btn" type="button" data-copy-cmd="scoop install handbrake-cli">复制</button>
+            </div>
+            <p class="help-tip">若安装后终端找不到 <code>HandBrakeCLI</code>，把含 <code>HandBrakeCLI.exe</code> 的目录加入 PATH，重开终端后再试。</p>
+            <div class="help-os">macOS（Homebrew）</div>
+            <div class="help-cmd-row">
+              <code>brew install handbrake</code>
+              <button class="text-btn" type="button" data-copy-cmd="brew install handbrake">复制</button>
+            </div>
+            <div class="help-os">Linux（Debian / Ubuntu）</div>
+            <div class="help-cmd-row">
+              <code>sudo apt update &amp;&amp; sudo apt install -y handbrake-cli</code>
+              <button class="text-btn" type="button" data-copy-cmd="sudo apt update && sudo apt install -y handbrake-cli">复制</button>
+            </div>
+          </div>
+          <p class="help-tip">验证：执行 <code>HandBrakeCLI --version</code>（Linux 上也可能是 <code>HandBrakeCLI</code> / 包提供的同名命令）。通过后再重启本服务。</p>
+        </article>
+
+        <article class="help-card">
+          <h3>安装顺序建议</h3>
+          <ol class="help-steps">
+            <li>先装 FFmpeg（日常浏览、播放、字幕相关都靠它）。</li>
+            <li>需要转码时再装 HandBrakeCLI。</li>
+            <li>确认命令行能直接运行后，重启 Tricks Video 服务。</li>
+          </ol>
+        </article>
+      </div>
     </section>
 
     <section id="player" class="player" hidden>
@@ -183,7 +277,7 @@ try {
         <button class="ctrl-btn" id="playerMenuBtn" type="button" title="更多">⋯</button>
       </header>
       <div class="detail-video" id="detailVideoBox">
-        <video id="video" controls controlsList="nofullscreen" playsinline></video>
+        <video id="video" controls playsinline></video>
         <img id="still" alt="" hidden>
         <div id="subOverlay" class="sub-overlay"></div>
         <select id="subSelect" class="sub-select" hidden></select>

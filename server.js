@@ -135,6 +135,34 @@ function spawnTracked(cmd, args, paths) {
   return child;
 }
 
+function shellQuote(arg) {
+  const s = String(arg);
+  if (!s) return '""';
+  if (/^[A-Za-z0-9_./:\\@%+=,-]+$/.test(s)) return s;
+  return '"' + s.replace(/"/g, '\\"') + '"';
+}
+function formatCmd(bin, args) {
+  return [bin, ...args.map(shellQuote)].join(' ');
+}
+function listVideosUnder(dirPath) {
+  const videos = [];
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (VIDEO_EXTS.has(path.extname(entry.name).toLowerCase())) videos.push(full);
+    }
+  };
+  walk(dirPath);
+  return videos;
+}
+function convertOutputFor(filePath) {
+  const ext = path.extname(filePath);
+  const isMp4 = ext.toLowerCase() === '.mp4';
+  const output = path.join(path.dirname(filePath), path.basename(filePath, ext) + (isMp4 ? '.fixed.mp4' : '.mp4'));
+  return { ext, isMp4, output };
+}
+
 function runCommand(cmd, args, paths, timeoutMs = 20000) {
   return new Promise((resolve, reject) => {
     const child = spawnTracked(cmd, args, paths);
@@ -1127,7 +1155,13 @@ app.get('/api/convert/file', async (req, res) => {
   if (quality === 'copy') args.push('-c', 'copy');
   else args.push('-vf', `scale=-2:${preset.height}`, '-c:v', 'libx264', '-b:v', preset.video + 'k', '-c:a', 'aac', '-b:a', preset.audio + 'k');
   args.push('-movflags', '+faststart', '-progress', 'pipe:1', output);
-  send({ type: 'start', file: path.basename(filePath), output: path.basename(output) });
+  send({
+    type: 'start',
+    file: path.basename(filePath),
+    output: path.basename(output),
+    command: formatCmd('ffmpeg', args.filter((item) => item !== '-progress' && item !== 'pipe:1')),
+    overall: 0
+  });
   const child = spawnTracked('ffmpeg', args, [filePath, output]);
   const stop = () => lease.killProcess(child);
   req.on('close', stop);
@@ -1135,11 +1169,11 @@ app.get('/api/convert/file', async (req, res) => {
     const match = /out_time_ms=(\d+)/.exec(chunk.toString());
     if (match && duration) {
       const percent = Math.min(99, Math.round((Number(match[1]) / 1000000) / duration * 100));
-      send({ type: 'progress', percent });
+      send({ type: 'progress', percent, overall: percent, name: path.basename(filePath) });
     }
   });
   child.once('close', (code) => {
-    if (code === 0 && fs.existsSync(output)) send({ type: 'done', output, percent: 100 });
+    if (code === 0 && fs.existsSync(output)) send({ type: 'done', output, percent: 100, overall: 100 });
     else {
       try { fs.unlinkSync(output); } catch { /* partial */ }
       send({ type: 'error', msg: '转换失败' });
@@ -1147,6 +1181,24 @@ app.get('/api/convert/file', async (req, res) => {
     res.end();
   });
   child.once('error', (err) => { send({ type: 'error', msg: err.message }); res.end(); });
+});
+
+function listChildFolders(dirPath) {
+  let entries = [];
+  try { entries = fs.readdirSync(dirPath, { withFileTypes: true }); } catch { return []; }
+  return entries
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => ({ name: entry.name, path: path.join(dirPath, entry.name) }))
+    .sort((a, b) => a.name.localeCompare(b.name, 'zh'));
+}
+
+app.get('/api/convert/children', (req, res) => {
+  const dirPath = needPath(req, res);
+  if (!dirPath) return;
+  if (!fs.existsSync(dirPath) || !fs.statSync(dirPath).isDirectory()) {
+    return res.status(400).json({ error: '找不到这个文件夹' });
+  }
+  res.json(listChildFolders(dirPath));
 });
 
 app.get('/api/convert/search', (req, res) => {
@@ -1164,7 +1216,10 @@ app.get('/api/convert/search', (req, res) => {
       if (results.length >= 40) return;
       const full = path.join(dir, entry.name);
       const hit = entry.name.toLowerCase().includes(query);
-      if (type === 'folder' && entry.isDirectory() && hit) results.push({ name: entry.name, path: full });
+      if (type === 'folder' && entry.isDirectory() && hit) {
+        const children = listChildFolders(full).slice(0, 80);
+        results.push({ name: entry.name, path: full, children, hasChildren: children.length > 0 });
+      }
       if (type === 'file' && entry.isFile() && VIDEO_EXTS.has(path.extname(entry.name).toLowerCase()) && hit) results.push({ name: entry.name, path: full });
       if (type === 'subtitle' && entry.isFile() && SUB_EXTS.has(path.extname(entry.name).toLowerCase()) && hit) results.push({ name: entry.name, path: full });
       if (entry.isDirectory()) walk(full);
@@ -1178,16 +1233,107 @@ function handbrakeArgs(input, output, encoder) {
   return ['-i', input, '-o', output, '-e', encoder || 'x265', '-q', '26', '--maxHeight', '1080', '--maxWidth', '1920', '-r', '30', '--vfr', '-a', '1', '-E', 'avc_aac', '-B', '160', '--mixdown', 'stereo'];
 }
 
+app.get('/api/convert/preview', (req, res) => {
+  const mode = String(req.query.mode || 'single');
+  const encoder = req.query.encoder === 'x264' ? 'x264' : 'x265';
+  if (mode === 'single') {
+    const filePath = needPath(req, res);
+    if (!filePath) return;
+    if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+      return res.status(400).json({ error: '找不到这个视频文件' });
+    }
+    const { isMp4, output } = convertOutputFor(filePath);
+    const args = handbrakeArgs(filePath, output, encoder);
+    return res.json({
+      mode,
+      path: filePath,
+      output,
+      encoder,
+      isMp4,
+      replace: isMp4,
+      total: 1,
+      files: [path.basename(filePath)],
+      command: formatCmd('HandBrakeCLI', args),
+      note: isMp4
+        ? '这是 MP4→MP4 修复转换：先写出 .fixed.mp4，成功后再替换原文件。'
+        : '转换完成后会在同目录生成同名 .mp4。'
+    });
+  }
+  if (mode === 'folder') {
+    const dirPath = needPath(req, res);
+    if (!dirPath) return;
+    if (!fs.existsSync(dirPath) || !fs.statSync(dirPath).isDirectory()) {
+      return res.status(400).json({ error: '找不到这个文件夹' });
+    }
+    let videos = [];
+    try { videos = listVideosUnder(dirPath); }
+    catch (err) { return res.status(400).json({ error: err.message }); }
+    const sample = videos[0];
+    const sampleOut = sample ? convertOutputFor(sample).output : '';
+    const sampleArgs = sample ? handbrakeArgs(sample, sampleOut, encoder) : handbrakeArgs('<input>', '<output>', encoder);
+    return res.json({
+      mode,
+      path: dirPath,
+      encoder,
+      total: videos.length,
+      files: videos.map((item) => path.relative(dirPath, item) || path.basename(item)).slice(0, 40),
+      more: Math.max(0, videos.length - 40),
+      command: formatCmd('HandBrakeCLI', sampleArgs),
+      note: '会递归转换文件夹内全部视频（含 MP4→MP4 修复）。MP4 成功后替换原文件；其他格式生成同名 .mp4。'
+    });
+  }
+  if (mode === 'batch') {
+    const dirPath = needPath(req, res);
+    if (!dirPath) return;
+    if (!fs.existsSync(dirPath) || !fs.statSync(dirPath).isDirectory()) {
+      return res.status(400).json({ error: '找不到这个文件夹' });
+    }
+    const limit = Number(req.query.limit) || 0;
+    const done = new Set(fs.existsSync(FILES.convertLog) ? fs.readFileSync(FILES.convertLog, 'utf8').split(/\r?\n/).filter(Boolean) : []);
+    const found = [];
+    const walk = (dir) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (path.extname(entry.name).toLowerCase() === '.mkv') found.push(full);
+      }
+    };
+    try { walk(dirPath); } catch (err) { return res.status(400).json({ error: err.message }); }
+    const pending = found.filter((file) => !done.has(path.relative(dirPath, file)));
+    const queue = limit > 0 ? pending.slice(0, limit) : pending;
+    const sample = queue[0];
+    const sampleOut = sample ? sample.replace(/\.mkv$/i, '.mp4') : '<output.mp4>';
+    const sampleArgs = [
+      '-i', sample || '<input.mkv>', '-o', sampleOut, '-e', encoder,
+      '--maxHeight', '1080', '--maxWidth', '1920', '-r', '30', '--vfr',
+      '--audio-lang-list', 'cmn,chi,eng', '--subtitle-lang-list', 'chi,zho'
+    ];
+    return res.json({
+      mode,
+      path: dirPath,
+      encoder,
+      total: queue.length,
+      skipped: found.length - pending.length,
+      files: queue.map((item) => path.relative(dirPath, item) || path.basename(item)).slice(0, 40),
+      more: Math.max(0, queue.length - 40),
+      command: formatCmd('HandBrakeCLI', sampleArgs),
+      note: '只处理尚未记录过的 MKV；已存在同名 MP4 会跳过。'
+    });
+  }
+  return res.status(400).json({ error: '未知预览类型' });
+});
+
 app.get('/api/convert/extract-sub', (req, res) => {
   const filePath = needPath(req, res);
   if (!filePath) return;
   const send = sse(res);
   const output = path.join(path.dirname(filePath), path.basename(filePath, path.extname(filePath)) + '.zh.srt');
-  const child = spawnTracked('ffmpeg', ['-y', '-i', filePath, '-map', '0:s:0', output], [filePath, output]);
+  const args = ['-y', '-i', filePath, '-map', '0:s:0', output];
+  const child = spawnTracked('ffmpeg', args, [filePath, output]);
   req.on('close', () => lease.killProcess(child));
-  send({ type: 'start', file: path.basename(filePath), output: path.basename(output) });
+  send({ type: 'start', file: path.basename(filePath), output: path.basename(output), command: formatCmd('ffmpeg', args), overall: 0 });
   child.once('close', (code) => {
-    if (code === 0 && fs.existsSync(output) && fs.statSync(output).size > 0) send({ type: 'done', output });
+    if (code === 0 && fs.existsSync(output) && fs.statSync(output).size > 0) send({ type: 'done', output, overall: 100 });
     else {
       try { fs.unlinkSync(output); } catch { /* none */ }
       send({ type: 'error', msg: '没有可提取的软字幕' });
@@ -1204,12 +1350,13 @@ app.get('/api/convert/merge-sub', async (req, res) => {
   if (!allowed(video) || !allowed(sub)) return res.status(403).json({ error: '该路径不在白名单中' });
   const send = sse(res);
   const tmp = path.join(path.dirname(video), path.basename(video, path.extname(video)) + '.subbed.mp4');
-  send({ type: 'start', file: path.basename(video) });
+  const args = [
+    '-y', '-i', video, '-i', sub, '-c', 'copy', '-c:s', 'mov_text',
+    '-metadata:s:s:0', 'language=chi', tmp
+  ];
+  send({ type: 'start', file: path.basename(video), command: formatCmd('ffmpeg', args), overall: 0 });
   try {
-    await runCommand('ffmpeg', [
-      '-y', '-i', video, '-i', sub, '-c', 'copy', '-c:s', 'mov_text',
-      '-metadata:s:s:0', 'language=chi', tmp
-    ], [video, sub, tmp], 0);
+    await runCommand('ffmpeg', args, [video, sub, tmp], 0);
     const backup = video + '.tv2bak';
     await lease.movePath(video, backup);
     try {
@@ -1219,7 +1366,7 @@ app.get('/api/convert/merge-sub', async (req, res) => {
       if (!fs.existsSync(video) && fs.existsSync(backup)) await lease.movePath(backup, video);
       throw err;
     }
-    send({ type: 'done', output: video });
+    send({ type: 'done', output: video, overall: 100 });
   } catch (err) {
     try { fs.unlinkSync(tmp); } catch { /* partial */ }
     send({ type: 'error', msg: err.message });
@@ -1232,15 +1379,29 @@ app.get('/api/convert/single', (req, res) => {
   if (!filePath) return;
   const encoder = req.query.encoder === 'x264' ? 'x264' : 'x265';
   const send = sse(res);
-  const ext = path.extname(filePath);
-  const isMp4 = ext.toLowerCase() === '.mp4';
-  const output = path.join(path.dirname(filePath), path.basename(filePath, ext) + (isMp4 ? '.fixed.mp4' : '.mp4'));
-  send({ type: 'start', file: path.basename(filePath), encoder });
-  const child = spawnTracked('HandBrakeCLI', handbrakeArgs(filePath, output, encoder), [filePath, output]);
+  const { isMp4, output } = convertOutputFor(filePath);
+  const args = handbrakeArgs(filePath, output, encoder);
+  send({
+    type: 'start',
+    file: path.basename(filePath),
+    path: filePath,
+    output,
+    encoder,
+    isMp4,
+    replace: isMp4,
+    command: formatCmd('HandBrakeCLI', args),
+    index: 1,
+    total: 1,
+    overall: 0
+  });
+  const child = spawnTracked('HandBrakeCLI', args, [filePath, output]);
   req.on('close', () => lease.killProcess(child));
   const onData = (chunk) => {
     const match = /(\d+\.?\d*)\s*%/.exec(chunk.toString());
-    if (match) send({ type: 'progress', percent: Number(match[1]) });
+    if (match) {
+      const percent = Number(match[1]);
+      send({ type: 'progress', percent, overall: percent, index: 1, total: 1, name: path.basename(filePath) });
+    }
   };
   child.stdout.on('data', onData);
   child.stderr.on('data', onData);
@@ -1257,7 +1418,7 @@ app.get('/api/convert/single', (req, res) => {
           return res.end();
         }
       }
-      send({ type: 'done', output: isMp4 ? filePath : output });
+      send({ type: 'done', output: isMp4 ? filePath : output, overall: 100 });
     } else {
       try { fs.unlinkSync(output); } catch { /* none */ }
       send({ type: 'error', msg: '转换失败，请确认已安装 HandBrakeCLI' });
@@ -1272,29 +1433,47 @@ app.get('/api/convert/folder', (req, res) => {
   if (!dirPath) return;
   const encoder = req.query.encoder === 'x264' ? 'x264' : 'x265';
   const send = sse(res);
-  const videos = [];
-  const walk = (dir) => {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) walk(full);
-      else if (VIDEO_EXTS.has(path.extname(entry.name).toLowerCase())) videos.push(full);
-    }
-  };
-  try { walk(dirPath); } catch (err) { send({ type: 'error', msg: err.message }); return res.end(); }
+  let videos = [];
+  try { videos = listVideosUnder(dirPath); } catch (err) { send({ type: 'error', msg: err.message }); return res.end(); }
   if (!videos.length) { send({ type: 'error', msg: '文件夹里没有视频' }); return res.end(); }
-  send({ type: 'start', total: videos.length });
+  const sample = videos[0];
+  const sampleOut = convertOutputFor(sample).output;
+  send({
+    type: 'start',
+    total: videos.length,
+    path: dirPath,
+    encoder,
+    command: formatCmd('HandBrakeCLI', handbrakeArgs(sample, sampleOut, encoder)),
+    overall: 0
+  });
   let index = 0;
+  let ok = 0;
+  let fail = 0;
   const next = () => {
-    if (index >= videos.length) { send({ type: 'done', total: videos.length }); return res.end(); }
+    if (index >= videos.length) {
+      send({ type: 'done', total: videos.length, ok, fail, overall: 100 });
+      return res.end();
+    }
     const filePath = videos[index];
-    const ext = path.extname(filePath);
-    const isMp4 = ext.toLowerCase() === '.mp4';
-    const output = path.join(path.dirname(filePath), path.basename(filePath, ext) + (isMp4 ? '.fixed.mp4' : '.mp4'));
-    send({ type: 'file', index: index + 1, total: videos.length, name: path.basename(filePath) });
-    const child = spawnTracked('HandBrakeCLI', handbrakeArgs(filePath, output, encoder), [filePath, output]);
+    const { isMp4, output } = convertOutputFor(filePath);
+    const args = handbrakeArgs(filePath, output, encoder);
+    send({
+      type: 'file',
+      index: index + 1,
+      total: videos.length,
+      name: path.basename(filePath),
+      path: filePath,
+      command: formatCmd('HandBrakeCLI', args),
+      overall: Math.round((index / videos.length) * 100)
+    });
+    const child = spawnTracked('HandBrakeCLI', args, [filePath, output]);
     const onData = (chunk) => {
       const match = /(\d+\.?\d*)\s*%/.exec(chunk.toString());
-      if (match) send({ type: 'progress', percent: Number(match[1]), index: index + 1, total: videos.length });
+      if (match) {
+        const percent = Number(match[1]);
+        const overall = Math.min(99, Math.round(((index + percent / 100) / videos.length) * 100));
+        send({ type: 'progress', percent, overall, index: index + 1, total: videos.length, name: path.basename(filePath) });
+      }
     };
     child.stdout.on('data', onData);
     child.stderr.on('data', onData);
@@ -1308,15 +1487,22 @@ app.get('/api/convert/folder', (req, res) => {
             await lease.removeFile(backup);
           } catch { /* original stays */ }
         }
-        send({ type: 'file-done', index: index + 1, name: path.basename(filePath) });
+        ok += 1;
+        send({ type: 'file-done', index: index + 1, total: videos.length, name: path.basename(filePath), ok, fail });
       } else {
         try { fs.unlinkSync(output); } catch { /* none */ }
-        send({ type: 'file-error', index: index + 1, name: path.basename(filePath) });
+        fail += 1;
+        send({ type: 'file-error', index: index + 1, total: videos.length, name: path.basename(filePath), ok, fail, msg: '转换失败' });
       }
       index += 1;
       next();
     });
-    child.once('error', () => { index += 1; next(); });
+    child.once('error', () => {
+      fail += 1;
+      send({ type: 'file-error', index: index + 1, total: videos.length, name: path.basename(filePath), ok, fail, msg: '无法启动 HandBrakeCLI' });
+      index += 1;
+      next();
+    });
   };
   next();
 });
@@ -1339,38 +1525,71 @@ app.get('/api/convert/batch', (req, res) => {
   try { walk(dirPath); } catch (err) { send({ type: 'error', msg: err.message }); return res.end(); }
   const pending = found.filter((file) => !done.has(path.relative(dirPath, file)));
   const queue = limit > 0 ? pending.slice(0, limit) : pending;
-  if (!queue.length) { send({ type: 'done', total: 0, skipped: found.length }); return res.end(); }
-  send({ type: 'start', total: queue.length, skipped: found.length - pending.length });
+  if (!queue.length) { send({ type: 'done', total: 0, skipped: found.length, overall: 100 }); return res.end(); }
+  const sample = queue[0];
+  const sampleArgs = [
+    '-i', sample, '-o', sample.replace(/\.mkv$/i, '.mp4'), '-e', encoder,
+    '--maxHeight', '1080', '--maxWidth', '1920', '-r', '30', '--vfr',
+    '--audio-lang-list', 'cmn,chi,eng', '--subtitle-lang-list', 'chi,zho'
+  ];
+  send({
+    type: 'start',
+    total: queue.length,
+    skipped: found.length - pending.length,
+    path: dirPath,
+    command: formatCmd('HandBrakeCLI', sampleArgs),
+    overall: 0
+  });
   let index = 0;
+  let ok = 0;
+  let fail = 0;
   const next = () => {
-    if (index >= queue.length) { send({ type: 'done', total: queue.length }); return res.end(); }
+    if (index >= queue.length) {
+      send({ type: 'done', total: queue.length, ok, fail, overall: 100 });
+      return res.end();
+    }
     const filePath = queue[index];
     const rel = path.relative(dirPath, filePath);
     const output = filePath.replace(/\.mkv$/i, '.mp4');
     if (fs.existsSync(output) && fs.statSync(output).size > 0) {
       fs.appendFileSync(FILES.convertLog, rel + '\n');
-      send({ type: 'file-skip', index: index + 1, name: path.basename(filePath) });
+      ok += 1;
+      send({ type: 'file-skip', index: index + 1, total: queue.length, name: path.basename(filePath), ok, fail });
       index += 1;
       return next();
     }
-    send({ type: 'file', index: index + 1, total: queue.length, name: path.basename(filePath) });
-    const child = spawnTracked('HandBrakeCLI', [
+    const args = [
       '-i', filePath, '-o', output, '-e', encoder, '--maxHeight', '1080', '--maxWidth', '1920',
       '-r', '30', '--vfr', '--audio-lang-list', 'cmn,chi,eng', '--subtitle-lang-list', 'chi,zho'
-    ], [filePath, output]);
+    ];
+    send({
+      type: 'file',
+      index: index + 1,
+      total: queue.length,
+      name: path.basename(filePath),
+      command: formatCmd('HandBrakeCLI', args),
+      overall: Math.round((index / queue.length) * 100)
+    });
+    const child = spawnTracked('HandBrakeCLI', args, [filePath, output]);
     const onData = (chunk) => {
       const match = /(\d+\.?\d*)\s*%/.exec(chunk.toString());
-      if (match) send({ type: 'progress', percent: Number(match[1]), index: index + 1, total: queue.length });
+      if (match) {
+        const percent = Number(match[1]);
+        const overall = Math.min(99, Math.round(((index + percent / 100) / queue.length) * 100));
+        send({ type: 'progress', percent, overall, index: index + 1, total: queue.length, name: path.basename(filePath) });
+      }
     };
     child.stdout.on('data', onData);
     child.stderr.on('data', onData);
     child.once('close', (code) => {
       if (code === 0 && fs.existsSync(output) && fs.statSync(output).size > 0) {
         fs.appendFileSync(FILES.convertLog, rel + '\n');
-        send({ type: 'file-done', index: index + 1, name: path.basename(filePath) });
+        ok += 1;
+        send({ type: 'file-done', index: index + 1, total: queue.length, name: path.basename(filePath), ok, fail });
       } else {
         try { fs.unlinkSync(output); } catch { /* none */ }
-        send({ type: 'file-error', index: index + 1, name: path.basename(filePath) });
+        fail += 1;
+        send({ type: 'file-error', index: index + 1, total: queue.length, name: path.basename(filePath), ok, fail, msg: '转换失败' });
       }
       index += 1;
       next();

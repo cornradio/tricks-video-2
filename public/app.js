@@ -30,6 +30,9 @@ const state = {
   category: '',
   links: [],
   convertTab: 'extract',
+  convertPick: '',
+  convertCommand: '',
+  convertPreview: null,
   local: { root: null, map: new Map(), tree: [], folder: '', files: [] },
   thumbToken: 0,
   listSeq: 0,
@@ -139,6 +142,7 @@ function themeMarkup() {
 }
 
 function setView(view, opts = {}) {
+  if (view === 'library' || view === 'local') view = 'browse';
   closePlayer();
   state.view = view;
   location.hash = view;
@@ -148,13 +152,12 @@ function setView(view, opts = {}) {
   document.querySelectorAll('#modeDrop button').forEach((button) => {
     button.classList.toggle('active', button.dataset.view === view);
   });
-  $('app').classList.toggle('noside', view === 'convert' || view === 'links');
+  const noside = view === 'convert' || view === 'links' || view === 'help';
+  $('app').classList.toggle('noside', noside);
   $('app').dataset.view = view;
-  $('sideTitle').textContent = view === 'library' ? '分类' : view === 'local' ? '本机' : '文件夹';
-  $('sideAdd').hidden = view === 'convert' || view === 'links';
+  $('sideTitle').textContent = '文件夹';
+  $('sideAdd').hidden = noside;
   $('app').classList.remove('nav-open');
-  if (view === 'library') loadLibrary().catch((err) => toast(err.message));
-  if (view === 'local') bootLocal().catch((err) => toast(err.message));
   if (view === 'convert') renderConvert();
   if (view === 'links') loadLinks().catch((err) => toast(err.message));
   if (view === 'browse' && !opts.keep) {
@@ -182,15 +185,27 @@ function releaseVideo() {
   state.thumbToken += 1;
 }
 
+function syncAppTopH() {
+  const top = document.querySelector('.top');
+  if (!top) return;
+  document.documentElement.style.setProperty('--app-top-h', Math.ceil(top.getBoundingClientRect().height) + 'px');
+}
 function syncTopChrome() {
   const top = document.querySelector('.top');
   if (!top) return;
   const playing = !$('player').hidden;
-  const mobile = window.matchMedia('(max-width: 900px)').matches;
-  const scrolled = ($('main')?.scrollTop || 0) > 12;
-  // Playing: never need search/sort. Mobile list scroll: compact sticky bar.
-  top.classList.toggle('filters-collapsed', playing || (mobile && scrolled));
+  const mobile = isMobileLayout();
+  const filtersOpen = top.classList.contains('filters-open');
+  // Playing: hide search/sort. Mobile: collapsed unless filter toggle is open.
+  top.classList.toggle('filters-collapsed', playing || (mobile && !filtersOpen));
   document.querySelector('.app')?.classList.toggle('playing', playing);
+  const toggle = $('filterToggleBtn');
+  if (toggle) {
+    toggle.classList.toggle('on', filtersOpen && !playing);
+    toggle.setAttribute('aria-expanded', filtersOpen && !playing ? 'true' : 'false');
+    toggle.hidden = playing;
+  }
+  syncAppTopH();
 }
 function showPlayerPage() {
   if (typeof hideHover === 'function') hideHover();
@@ -1449,16 +1464,40 @@ async function renamePath(filePath, isDir) {
   return data.path;
 }
 
-async function deletePath(filePath, isDir) {
+async function deletePath(filePath, isDir, opts = {}) {
   const label = isDir ? '删除这个文件夹？里面的内容也会一起消失。' : '删除这个文件？';
   if (!(await confirmBox(label))) return false;
-  if (state.player && (state.player.path === filePath || (isDir && underPath(state.player.path, filePath)))) closePlayer();
+  const playing = !!(state.player && (state.player.path === filePath || (isDir && underPath(state.player.path, filePath))));
+  if (playing && opts.continueNext) releaseVideo();
+  else if (playing) closePlayer();
   else releaseVideo();
   await api(isDir ? '/api/folder/delete' : '/api/file/delete', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ path: filePath })
   });
+  return true;
+}
+async function deleteCurrentAndContinue() {
+  const player = state.player;
+  if (!player || player.kind !== 'file') return false;
+  const list = currentList().slice();
+  const key = itemKey(player);
+  const index = list.findIndex((item) => itemKey(item) === key);
+  let target = null;
+  if (list.length > 1 && index >= 0) {
+    target = list[index + 1] || list[0];
+    if (itemKey(target) === key) target = list.find((item) => itemKey(item) !== key) || null;
+  }
+  if (!(await deletePath(player.path, false, { continueNext: true }))) return false;
+  await refreshBrowse();
+  const fresh = currentList();
+  if (!fresh.length) {
+    closePlayer();
+    return true;
+  }
+  const found = target && fresh.find((item) => itemKey(item) === itemKey(target));
+  openListItem(found || fresh[Math.min(Math.max(index, 0), fresh.length - 1)]);
   return true;
 }
 
@@ -1556,10 +1595,23 @@ function askText(title, value) {
 }
 function confirmBox(message) {
   if (localStorage.getItem('tv2-skip-delete') === '1') return Promise.resolve(true);
+  return confirmAction(message, { ok: '删除', cancel: '留下' });
+}
+function confirmAction(message, opts = {}) {
+  const okLabel = opts.ok || '确定';
+  const cancelLabel = opts.cancel || '取消';
+  const body = opts.body || '';
   return new Promise((resolve) => {
     const modal = $('modal');
     modal.hidden = false;
-    modal.innerHTML = `<div class="modal"><h3>${esc(message)}</h3><div class="actions"><button class="text-btn" id="modalCancel" type="button">留下</button><button class="solid-btn" id="modalOk" type="button">删除</button></div></div>`;
+    modal.innerHTML = `<div class="modal modal-confirm">
+      <h3>${esc(message)}</h3>
+      ${body ? `<div class="confirm-body">${body}</div>` : ''}
+      <div class="actions">
+        <button class="text-btn" id="modalCancel" type="button">${esc(cancelLabel)}</button>
+        <button class="solid-btn" id="modalOk" type="button">${esc(okLabel)}</button>
+      </div>
+    </div>`;
     $('modalCancel').onclick = () => { modal.hidden = true; resolve(false); };
     $('modalOk').onclick = () => { modal.hidden = true; resolve(true); };
   });
@@ -1773,19 +1825,119 @@ function renderHelp() {
   };
 }
 
+function appendConvertLog(line, kind = '') {
+  const log = $('convertLog');
+  if (!log) return;
+  const row = document.createElement('div');
+  row.className = 'convert-log-line' + (kind ? ' is-' + kind : '');
+  const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+  row.textContent = `[${time}] ${line}`;
+  log.appendChild(row);
+  log.scrollTop = log.scrollHeight;
+}
+function setConvertCommand(command) {
+  if (!command) return;
+  state.convertCommand = command;
+  const box = $('convertCmd');
+  if (box) box.textContent = command;
+  const dockCmd = $('dockCmd');
+  if (dockCmd) dockCmd.textContent = command;
+}
+function updateConvertProgress(data) {
+  const overall = data.overall != null
+    ? data.overall
+    : (data.percent != null ? data.percent : null);
+  const filePct = data.percent != null ? data.percent : null;
+  if (overall != null) {
+    if ($('convertBar')) $('convertBar').style.width = overall + '%';
+    if ($('convertPct')) $('convertPct').textContent = Math.round(overall) + '%';
+    if ($('dockBar')) $('dockBar').style.width = overall + '%';
+    if ($('dockPct')) $('dockPct').textContent = Math.round(overall) + '%';
+  }
+  const parts = [];
+  if (data.index && data.total) parts.push(`${data.index}/${data.total}`);
+  if (data.name || data.file) parts.push(data.name || data.file);
+  if (filePct != null && data.total > 1) parts.push(`当前 ${Math.round(filePct)}%`);
+  if (data.ok != null || data.fail != null) parts.push(`成功 ${data.ok || 0} · 失败 ${data.fail || 0}`);
+  const meta = parts.join(' · ');
+  if ($('convertMeta')) $('convertMeta').textContent = meta;
+  if ($('dockText')) $('dockText').textContent = meta || data.msg || data.type || '';
+  if (data.command) setConvertCommand(data.command);
+}
 async function startConvert(url) {
+  const inConvert = state.view === 'convert';
+  const progress = $('convertProgress');
+  if (progress && inConvert) {
+    progress.hidden = false;
+    if ($('convertStatus')) $('convertStatus').textContent = '正在转换…';
+    if ($('convertBar')) $('convertBar').style.width = '0%';
+    if ($('convertPct')) $('convertPct').textContent = '0%';
+    if ($('convertMeta')) $('convertMeta').textContent = '';
+    if ($('convertLog')) $('convertLog').innerHTML = '';
+    if ($('convertCmd')) $('convertCmd').textContent = state.convertCommand || '';
+  }
   $('dock').hidden = false;
-  $('dock').innerHTML = '<strong>正在处理</strong><div class="bar"><span id="dockBar"></span></div><div id="dockText" class="sub"></div><button class="text-btn" id="dockClose" type="button">关闭</button>';
+  $('dock').innerHTML = `
+    <div class="dock-head"><strong id="dockTitle">正在转换</strong><span id="dockPct">0%</span></div>
+    <div class="bar"><span id="dockBar"></span></div>
+    <div id="dockText" class="sub"></div>
+    <pre id="dockCmd" class="dock-cmd" hidden></pre>
+    <div class="dock-actions">
+      <button class="text-btn" id="dockCopy" type="button">复制命令</button>
+      <button class="text-btn" id="dockClose" type="button">关闭</button>
+    </div>`;
   $('dockClose').onclick = () => { $('dock').hidden = true; };
+  $('dockCopy').onclick = async () => {
+    const cmd = state.convertCommand || ($('dockCmd')?.textContent || '');
+    if (!cmd) return toast('还没有命令');
+    try {
+      await navigator.clipboard.writeText(cmd);
+      toast('命令已复制');
+    } catch { toast('复制失败'); }
+  };
   await new Promise((resolve, reject) => {
     const source = new EventSource(url);
     let finished = false;
     source.onmessage = (event) => {
       const data = JSON.parse(event.data);
-      if (data.percent != null && $('dockBar')) $('dockBar').style.width = data.percent + '%';
-      if ($('dockText')) $('dockText').textContent = data.msg || data.name || data.file || data.type;
-      const log = $('convertLog');
-      if (log && state.view === 'convert') log.textContent += (data.msg || data.name || data.type) + '\n';
+      updateConvertProgress(data);
+      if (data.type === 'start') {
+        if ($('convertStatus')) $('convertStatus').textContent = '正在转换…';
+        if ($('dockTitle')) $('dockTitle').textContent = '正在转换';
+        if (data.command) {
+          setConvertCommand(data.command);
+          if ($('dockCmd')) { $('dockCmd').hidden = false; $('dockCmd').textContent = data.command; }
+        }
+        appendConvertLog(
+          data.total > 1
+            ? `开始：共 ${data.total} 个文件` + (data.path ? ` · ${data.path}` : '')
+            : `开始：${data.file || data.path || ''}`,
+          'start'
+        );
+        if (data.note) appendConvertLog(data.note);
+      } else if (data.type === 'file') {
+        appendConvertLog(`(${data.index}/${data.total}) 开始 ${data.name || data.path || ''}`);
+      } else if (data.type === 'file-done') {
+        appendConvertLog(`完成 ${data.name}`, 'ok');
+      } else if (data.type === 'file-skip') {
+        appendConvertLog(`跳过 ${data.name}`, 'skip');
+      } else if (data.type === 'file-error') {
+        appendConvertLog(`失败 ${data.name}${data.msg ? ' · ' + data.msg : ''}`, 'err');
+      } else if (data.type === 'progress') {
+        // bar only
+      } else if (data.type === 'done') {
+        const summary = data.total
+          ? `全部完成：${data.total} 个` + (data.ok != null ? `（成功 ${data.ok} / 失败 ${data.fail || 0}）` : '')
+          : `完成${data.output ? ' · ' + data.output : ''}`;
+        appendConvertLog(summary, 'ok');
+        if ($('convertStatus')) $('convertStatus').textContent = '已完成';
+        if ($('dockTitle')) $('dockTitle').textContent = '已完成';
+        updateConvertProgress({ ...data, overall: 100 });
+      } else if (data.type === 'error') {
+        appendConvertLog(data.msg || '失败', 'err');
+        if ($('convertStatus')) $('convertStatus').textContent = '失败';
+        if ($('dockTitle')) $('dockTitle').textContent = '失败';
+      }
       if (data.type === 'done' || data.type === 'error') {
         finished = true;
         source.close();
@@ -1807,10 +1959,15 @@ function playerMore() {
   const rect = $('playerMenuBtn').getBoundingClientRect();
   const items = [];
   if (player.kind === 'file') {
-    ['mpv', 'vlc', 'potplayer'].forEach((playerName) => items.push({
-      label: '用 ' + playerName + ' 打开',
-      run: () => api('/api/open-player', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: player.path, player: playerName }) })
-    }));
+    items.push({
+      label: '下载视频',
+      run: () => {
+        const link = document.createElement('a');
+        link.href = '/api/stream?' + qs({ path: player.path, download: '1' });
+        link.download = player.name;
+        link.click();
+      }
+    });
     ['copy', '1080p', '720p', '480p'].forEach((quality) => items.push({
       label: '转换 ' + quality,
       run: () => startConvert('/api/convert/file?' + qs({ path: player.path, quality }))
@@ -1829,7 +1986,7 @@ function playerMore() {
     items.push({
       label: '删除',
       danger: true,
-      run: async () => { if (await deletePath(player.path, false)) { closePlayer(); await refreshBrowse(); } }
+      run: () => deleteCurrentAndContinue()
     });
   }
   openMenu(rect.left, rect.bottom + 6, items);
@@ -2088,40 +2245,255 @@ async function deleteLocal(file) {
 
 function renderConvert() {
   const tab = state.convertTab;
-  const encoder = `<label class="field"><span>编码器</span><input id="convEncoder" value="x265"></label>`;
+  state.convertPick = '';
+  state.convertCommand = '';
+  const encoder = `<label class="field"><span>编码器</span>
+    <select id="convEncoder">
+      <option value="x265" selected>x265</option>
+      <option value="x264">x264</option>
+    </select>
+  </label>`;
   const base = `<label class="field"><span>从哪个文件夹里找</span><input id="convBase" placeholder="D:\\Videos" value="${esc(state.root)}"></label>`;
+  const pick = `<div class="conv-pick" id="convPickBox" hidden>
+    <div class="conv-pick-label">已选择</div>
+    <div class="conv-pick-path" id="convPickPath"></div>
+    <div class="conv-subs" id="convSubs" hidden></div>
+  </div>`;
+  const preview = `<div class="convert-cmd-wrap" id="convPreviewWrap" hidden>
+    <div class="convert-cmd-top">
+      <span>完整命令（可复制到其他机器）</span>
+      <button class="text-btn" id="convCopyPreview" type="button">复制命令</button>
+    </div>
+    <pre id="convPreviewCmd" class="convert-cmd"></pre>
+    <p class="convert-note" id="convPreviewNote"></p>
+  </div>`;
   const forms = {
-    extract: base + `<label class="field"><span>视频文件名里的词</span><input id="convQ" placeholder="输入后点搜索"></label><div id="convHits" class="results"></div><button class="solid-btn" id="convRun" type="button">提取字幕</button>`,
-    merge: base + `<label class="field"><span>视频</span><input id="convVideo"></label><label class="field"><span>字幕</span><input id="convSub"></label><button class="solid-btn" id="convRun" type="button">合并进 MP4</button>`,
-    single: base + encoder + `<label class="field"><span>视频文件名里的词</span><input id="convQ"></label><div id="convHits" class="results"></div><button class="solid-btn" id="convRun" type="button">开始转换</button>`,
-    folder: base + encoder + `<label class="field"><span>文件夹名里的词</span><input id="convQ"></label><div id="convHits" class="results"></div><button class="solid-btn" id="convRun" type="button">转换整个文件夹</button>`,
-    batch: base + encoder + `<label class="field"><span>这一轮最多几个，0 表示全部</span><input id="convLimit" value="0"></label><button class="solid-btn" id="convRun" type="button">把还没转过的 MKV 转成 MP4</button>`
+    extract: base + `<label class="field"><span>视频文件名里的词</span><input id="convQ" placeholder="输入后点搜索"></label><div id="convHits" class="results"></div>${pick}<button class="solid-btn" id="convRun" type="button">提取字幕</button>`,
+    merge: base + `<label class="field"><span>视频完整路径</span><input id="convVideo"></label><label class="field"><span>字幕完整路径</span><input id="convSub"></label><button class="solid-btn" id="convRun" type="button">合并进 MP4</button>`,
+    single: base + encoder + `<label class="field"><span>视频文件名里的词（含 MP4）</span><input id="convQ" placeholder="搜到后点选文件"></label><div id="convHits" class="results"></div>${pick}${preview}<button class="solid-btn" id="convRun" type="button">确认并转换</button>`,
+    folder: base + encoder + `<label class="field"><span>文件夹名里的词</span><input id="convQ" placeholder="搜到后点选；有子文件夹可继续进入"></label><div id="convHits" class="results"></div>${pick}${preview}<button class="solid-btn" id="convRun" type="button">确认并转换文件夹</button>`,
+    batch: base + encoder + `<label class="field"><span>这一轮最多几个，0 表示全部</span><input id="convLimit" value="0"></label>${preview}<button class="solid-btn" id="convRun" type="button">确认并批量转换 MKV</button>`
   };
   $('convertForm').innerHTML = forms[tab];
-  $('convertLog').textContent = '';
+  const progress = $('convertProgress');
+  if (progress) progress.hidden = true;
+  if ($('convertLog')) $('convertLog').innerHTML = '';
+  if ($('convertCmd')) $('convertCmd').textContent = '';
+
+  const renderSubfolders = (kids, parentPath) => {
+    const box = $('convSubs');
+    if (!box) return;
+    if (!kids?.length) {
+      box.hidden = true;
+      box.innerHTML = '';
+      return;
+    }
+    box.hidden = false;
+    box.innerHTML = `
+      <div class="conv-subs-label">子文件夹（点选可转换该子目录）</div>
+      <div class="conv-subs-list">
+        ${kids.map((kid) => `<button type="button" class="conv-sub-btn" data-path="${esc(kid.path)}">${esc(kid.name)}</button>`).join('')}
+      </div>`;
+    box.querySelectorAll('[data-path]').forEach((button) => {
+      button.onclick = () => setPick(button.dataset.path);
+    });
+    if (parentPath) box.dataset.parent = parentPath;
+  };
+
+  const loadSubfolders = async (fullPath) => {
+    if (tab !== 'folder' || !fullPath) {
+      renderSubfolders([]);
+      return;
+    }
+    const kids = await api('/api/convert/children?' + qs({ path: fullPath })).catch(() => []);
+    renderSubfolders(kids, fullPath);
+  };
+
+  const setPick = (fullPath, children) => {
+    state.convertPick = fullPath || '';
+    const box = $('convPickBox');
+    if (!box) return;
+    if (!fullPath) {
+      box.hidden = true;
+      renderSubfolders([]);
+      return;
+    }
+    box.hidden = false;
+    $('convPickPath').textContent = fullPath;
+    if (tab === 'folder') {
+      if (Array.isArray(children)) renderSubfolders(children, fullPath);
+      else loadSubfolders(fullPath);
+    }
+    refreshPreview();
+  };
+
+  const refreshPreview = async () => {
+    if (!['single', 'folder', 'batch'].includes(tab)) return;
+    const encoderVal = $('convEncoder')?.value || 'x265';
+    const basePath = $('convBase')?.value.trim() || '';
+    let target = '';
+    let mode = tab;
+    if (tab === 'single') target = state.convertPick;
+    else if (tab === 'folder') target = state.convertPick || basePath;
+    else target = basePath;
+    const wrap = $('convPreviewWrap');
+    if (!wrap) return;
+    if (!target) {
+      wrap.hidden = true;
+      return;
+    }
+    try {
+      const params = { mode, path: target, encoder: encoderVal };
+      if (tab === 'batch') params.limit = $('convLimit')?.value || '0';
+      const data = await api('/api/convert/preview?' + qs(params));
+      state.convertPreview = data;
+      state.convertCommand = data.command || '';
+      wrap.hidden = false;
+      $('convPreviewCmd').textContent = data.command || '';
+      const bits = [];
+      if (data.path) bits.push(`路径：${data.path}`);
+      if (data.output) bits.push(`输出：${data.output}`);
+      if (data.total != null) bits.push(`数量：${data.total}`);
+      if (data.skipped) bits.push(`已跳过：${data.skipped}`);
+      if (data.note) bits.push(data.note);
+      if (data.files?.length) {
+        const list = data.files.slice(0, 8).join('\n');
+        bits.push('文件：\n' + list + (data.more ? `\n…另有 ${data.more} 个` : ''));
+      }
+      $('convPreviewNote').textContent = bits.join('\n');
+    } catch (err) {
+      wrap.hidden = false;
+      $('convPreviewCmd').textContent = '';
+      $('convPreviewNote').textContent = err.message;
+      state.convertPreview = null;
+    }
+  };
+
   const searchBox = $('convQ');
   if (searchBox) {
     let timer;
+    const bindHits = (hits) => {
+      if (tab === 'folder') {
+        $('convHits').innerHTML = hits.map((hit) => {
+          const kids = hit.children || [];
+          const kidHtml = kids.length
+            ? `<div class="conv-hit-kids">
+                ${kids.slice(0, 24).map((kid) => `<button type="button" class="conv-sub-btn" data-path="${esc(kid.path)}" data-child="1">${esc(kid.name)}</button>`).join('')}
+                ${kids.length > 24 ? `<span class="conv-hit-more">+${kids.length - 24}</span>` : ''}
+              </div>`
+            : '';
+          return `<div class="conv-hit ${kids.length ? 'has-kids' : ''}">
+            <button type="button" class="conv-hit-main" data-path="${esc(hit.path)}">${esc(hit.path)}</button>
+            ${kidHtml}
+          </div>`;
+        }).join('') || '<div class="empty-inline">没有匹配结果</div>';
+      } else {
+        $('convHits').innerHTML = hits.map((hit) => `<button type="button" data-path="${esc(hit.path)}">${esc(hit.path)}</button>`).join('')
+          || '<div class="empty-inline">没有匹配结果</div>';
+      }
+      $('convHits').querySelectorAll('[data-path]').forEach((button) => {
+        button.onclick = (event) => {
+          event.stopPropagation();
+          const fullPath = button.dataset.path;
+          const hit = hits.find((item) => item.path === fullPath);
+          setPick(fullPath, hit?.children);
+          searchBox.value = fullPath.split(/[/\\]/).pop();
+          $('convHits').querySelectorAll('.conv-hit').forEach((row) => {
+            const match = [...row.querySelectorAll('[data-path]')].some((el) => el.dataset.path === fullPath);
+            row.classList.toggle('on', match);
+          });
+          $('convHits').querySelectorAll('[data-path]').forEach((item) => {
+            item.classList.toggle('on', item.dataset.path === fullPath);
+          });
+        };
+      });
+    };
     searchBox.oninput = () => {
       clearTimeout(timer);
       timer = setTimeout(async () => {
         const type = tab === 'folder' ? 'folder' : 'file';
         const hits = await api('/api/convert/search?' + qs({ q: searchBox.value, basePath: $('convBase').value, type })).catch(() => []);
-        $('convHits').innerHTML = hits.map((hit) => `<button type="button" data-path="${esc(hit.path)}">${esc(hit.path)}</button>`).join('');
-        $('convHits').querySelectorAll('button').forEach((button) => {
-          button.onclick = () => { state.convertPick = button.dataset.path; searchBox.value = button.dataset.path.split(/[/\\]/).pop(); };
-        });
+        bindHits(hits);
       }, 250);
     };
   }
+  if ($('convEncoder')) $('convEncoder').onchange = () => refreshPreview();
+  if ($('convBase')) $('convBase').onchange = () => refreshPreview();
+  if ($('convLimit')) $('convLimit').onchange = () => refreshPreview();
+  if ($('convCopyPreview')) {
+    $('convCopyPreview').onclick = async () => {
+      const cmd = state.convertCommand || $('convPreviewCmd')?.textContent || '';
+      if (!cmd) return toast('还没有命令');
+      try {
+        await navigator.clipboard.writeText(cmd);
+        toast('命令已复制');
+      } catch { toast('复制失败'); }
+    };
+  }
+  if ($('convertCopyCmd')) {
+    $('convertCopyCmd').onclick = async () => {
+      const cmd = state.convertCommand || $('convertCmd')?.textContent || '';
+      if (!cmd) return toast('还没有命令');
+      try {
+        await navigator.clipboard.writeText(cmd);
+        toast('命令已复制');
+      } catch { toast('复制失败'); }
+    };
+  }
+  if (tab === 'batch' || tab === 'folder') refreshPreview();
+
   $('convRun').onclick = async () => {
     try {
       const basePath = $('convBase')?.value.trim();
-      if (tab === 'extract') await startConvert('/api/convert/extract-sub?' + qs({ path: state.convertPick }));
-      if (tab === 'merge') await startConvert('/api/convert/merge-sub?' + qs({ video: $('convVideo').value.trim(), sub: $('convSub').value.trim() }));
-      if (tab === 'single') await startConvert('/api/convert/single?' + qs({ path: state.convertPick, encoder: $('convEncoder').value.trim() || 'x265' }));
-      if (tab === 'folder') await startConvert('/api/convert/folder?' + qs({ path: state.convertPick || basePath, encoder: $('convEncoder').value.trim() || 'x265' }));
-      if (tab === 'batch') await startConvert('/api/convert/batch?' + qs({ path: basePath, encoder: $('convEncoder').value.trim() || 'x265', limit: $('convLimit').value || '0' }));
+      const encoderVal = $('convEncoder')?.value || 'x265';
+      if (tab === 'extract') {
+        if (!state.convertPick) return toast('先搜索并点选一个视频');
+        const ok = await confirmAction('确认提取字幕？', {
+          ok: '开始提取',
+          body: `<p class="confirm-path">${esc(state.convertPick)}</p>`
+        });
+        if (!ok) return;
+        await startConvert('/api/convert/extract-sub?' + qs({ path: state.convertPick }));
+      } else if (tab === 'merge') {
+        const video = $('convVideo').value.trim();
+        const sub = $('convSub').value.trim();
+        if (!video || !sub) return toast('视频和字幕路径都要填');
+        const ok = await confirmAction('确认合并字幕到视频？', {
+          ok: '开始合并',
+          body: `<p class="confirm-path">视频：${esc(video)}</p><p class="confirm-path">字幕：${esc(sub)}</p>`
+        });
+        if (!ok) return;
+        await startConvert('/api/convert/merge-sub?' + qs({ video, sub }));
+      } else if (tab === 'single' || tab === 'folder' || tab === 'batch') {
+        const target = tab === 'single'
+          ? state.convertPick
+          : (tab === 'folder' ? (state.convertPick || basePath) : basePath);
+        if (!target) return toast(tab === 'single' ? '先搜索并点选一个视频' : '先填写或选择文件夹');
+        await refreshPreview();
+        const preview = state.convertPreview;
+        if (!preview) return toast('无法确认路径，请检查后再试');
+        if (!preview.total && tab !== 'single') return toast(preview.note || '没有可转换的文件');
+        const fileList = (preview.files || []).slice(0, 12).map((name) => `<li>${esc(name)}</li>`).join('');
+        const more = preview.more ? `<li>…另有 ${preview.more} 个</li>` : '';
+        const ok = await confirmAction(tab === 'single' ? '确认转换这个视频？' : '确认转换这个文件夹？', {
+          ok: '开始转换',
+          body: `
+            <p class="confirm-path">${esc(preview.path)}</p>
+            ${preview.output ? `<p class="confirm-sub">输出：${esc(preview.output)}</p>` : ''}
+            <p class="confirm-sub">共 ${preview.total || 0} 个文件 · 编码器 ${esc(preview.encoder || encoderVal)}</p>
+            ${preview.note ? `<p class="confirm-sub">${esc(preview.note)}</p>` : ''}
+            ${fileList ? `<ul class="confirm-files">${fileList}${more}</ul>` : ''}
+            <div class="convert-cmd-wrap confirm-cmd">
+              <div class="convert-cmd-top"><span>将执行的命令</span></div>
+              <pre class="convert-cmd">${esc(preview.command || '')}</pre>
+            </div>`
+        });
+        if (!ok) return;
+        state.convertCommand = preview.command || '';
+        if (tab === 'single') await startConvert('/api/convert/single?' + qs({ path: target, encoder: encoderVal }));
+        else if (tab === 'folder') await startConvert('/api/convert/folder?' + qs({ path: target, encoder: encoderVal }));
+        else await startConvert('/api/convert/batch?' + qs({ path: target, encoder: encoderVal, limit: $('convLimit').value || '0' }));
+      }
       toast('完成');
     } catch (err) { toast(err.message); }
   };
@@ -2608,6 +2980,7 @@ function wire() {
     if (isMobileLayout()) {
       app.classList.toggle('nav-open');
       syncMobileNavA11y();
+      syncAppTopH();
       return;
     }
     const next = !app.classList.contains('collapsed');
@@ -2615,6 +2988,14 @@ function wire() {
     localStorage.setItem('tv2-side-collapsed', next ? '1' : '0');
     $('menuBtn').title = next ? '展开侧栏' : '收起侧栏';
     $('menuBtn').setAttribute('aria-label', $('menuBtn').title);
+  };
+  $('filterToggleBtn').onclick = (event) => {
+    event.stopPropagation();
+    const top = document.querySelector('.top');
+    if (!top || !isMobileLayout()) return;
+    top.classList.toggle('filters-open');
+    syncTopChrome();
+    requestAnimationFrame(syncAppTopH);
   };
   if (localStorage.getItem('tv2-side-collapsed') === '1' && !isMobileLayout()) {
     $('app').classList.add('collapsed');
@@ -2624,14 +3005,6 @@ function wire() {
   $('navBackdrop').onclick = () => closeMobileNav();
   $('main').addEventListener('click', () => closeMobileNav());
   bindMobileNavGestures();
-  let topChromeRaf = 0;
-  $('main').addEventListener('scroll', () => {
-    if (topChromeRaf) return;
-    topChromeRaf = requestAnimationFrame(() => {
-      topChromeRaf = 0;
-      syncTopChrome();
-    });
-  }, { passive: true });
   window.addEventListener('resize', () => syncTopChrome());
   syncTopChrome();
   $('modeBtn').onclick = (event) => {
@@ -2734,9 +3107,17 @@ function wire() {
     if (!event.target.closest('#workspace')) closeWorkspaceDrop();
   });
   $('fullBtn').onclick = () => {
-    if (document.fullscreenElement) document.exitFullscreen();
-    else if (!$('player').hidden) $('detailVideoBox').requestFullscreen().catch(() => {});
-    else document.documentElement.requestFullscreen().catch(() => {});
+    // Page/browser fullscreen only (F11-like). Video uses its own control.
+    if (document.fullscreenElement === document.documentElement) {
+      document.exitFullscreen().catch(() => {});
+      return;
+    }
+    const enterPage = () => document.documentElement.requestFullscreen().catch(() => {});
+    if (document.fullscreenElement) {
+      document.exitFullscreen().then(enterPage).catch(enterPage);
+      return;
+    }
+    enterPage();
   };
   if (window.tv2Desktop) {
     document.documentElement.classList.add('electron');
@@ -3006,10 +3387,7 @@ function wire() {
     syncSortButtons();
     toast(state.shuffle ? '随机已开（播完一轮才重复）' : '随机已关');
   };
-  $('detailDelete').onclick = async () => {
-    if (state.player?.kind !== 'file') return;
-    if (await deletePath(state.player.path, false)) { closePlayer(); await refreshBrowse(); }
-  };
+  $('detailDelete').onclick = () => deleteCurrentAndContinue();
   $('notesBtn').onclick = () => $('notesSection').classList.toggle('show');
   $('clipsToggleBtn').onclick = () => $('clipsSection').classList.toggle('show');
   $('shotBtn').onclick = screenshot;
@@ -3195,6 +3573,16 @@ function wire() {
     $('convertTabs').querySelectorAll('button').forEach((item) => item.classList.toggle('active', item === button));
     renderConvert();
   };
+  $('panel-help')?.addEventListener('click', async (event) => {
+    const button = event.target.closest('[data-copy-cmd]');
+    if (!button) return;
+    const cmd = button.getAttribute('data-copy-cmd') || '';
+    if (!cmd) return;
+    try {
+      await navigator.clipboard.writeText(cmd);
+      toast('命令已复制');
+    } catch { toast('复制失败'); }
+  });
   document.addEventListener('paste', async (event) => {
     if (state.view !== 'browse' || !state.folder) return;
     const image = [...(event.clipboardData?.files || [])].find((file) => file.type.startsWith('image/'));
@@ -3309,7 +3697,8 @@ function wire() {
       if (next) { await refreshBrowse(); const file = fileByPath(next); if (file) openFile(file); }
     }
     if (event.key === 'Delete' && state.player.kind === 'file') {
-      if (await deletePath(state.player.path, false)) { closePlayer(); await refreshBrowse(); }
+      event.preventDefault();
+      await deleteCurrentAndContinue();
     }
   }, true);
 }
@@ -3320,7 +3709,8 @@ async function boot() {
   syncSortButtons();
   await loadHistory();
   const hash = location.hash.replace('#', '');
-  if (['library', 'local', 'convert', 'links'].includes(hash)) setView(hash);
+  if (hash === 'library' || hash === 'local') setView('browse');
+  else if (['convert', 'links', 'help'].includes(hash)) setView(hash);
   else if (state.root) await refreshBrowse();
   else await renderWelcome();
 }
