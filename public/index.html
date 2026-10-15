@@ -276,13 +276,15 @@ try {
         </div>
         <button class="ctrl-btn" id="playerMenuBtn" type="button" title="更多">⋯</button>
       </header>
-      <div class="detail-video" id="detailVideoBox">
-        <video id="video" controls playsinline></video>
-        <img id="still" alt="" hidden>
-        <div id="subOverlay" class="sub-overlay"></div>
-        <select id="subSelect" class="sub-select" hidden></select>
+      <div class="detail-stage">
+        <div class="detail-video" id="detailVideoBox">
+          <video id="video" controls playsinline></video>
+          <img id="still" alt="" hidden>
+          <div id="subOverlay" class="sub-overlay"></div>
+          <select id="subSelect" class="sub-select" hidden></select>
+        </div>
+        <div class="video-resize-handle" id="videoResizeHandle" title="拖动调整高度"></div>
       </div>
-      <div class="video-resize-handle" id="videoResizeHandle" title="拖动调整高度"></div>
       <div class="detail-name">
         <span class="detail-drag" id="detailDrag" draggable="true" title="拖到左侧文件夹以移动">⧉</span>
         <h2 id="playerTitle"></h2>

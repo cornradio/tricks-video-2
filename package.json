@@ -1,6 +1,6 @@
 {
   "name": "tricks-video-2",
-  "version": "2.1.3",
+  "version": "2.1.4",
   "description": "Tricks Video 2 — a calmer local video library whose file operations do not stay locked",
   "author": "Tricks",
   "main": "electron/main.js",

@@ -735,13 +735,21 @@ html[data-card-ui="in"] .card.placeholder .meta { min-height: 0; }
   flex-wrap: nowrap;
 }
 .nav-pair .text-btn { flex: none; white-space: nowrap; }
+.detail-stage {
+  margin: 12px 0;
+  background: #000;
+  border-radius: 12px;
+  overflow: hidden;
+  /* One continuous black shell so resize never leaves a hairline seam. */
+  isolation: isolate;
+}
 .detail-video {
   position: relative;
-  margin-top: 12px;
+  margin: 0;
   height: 50vh;
   min-height: 200px;
   background: #000;
-  border-radius: 12px 12px 0 0;
+  border-radius: 0;
   overflow: hidden;
   display: flex;
   align-items: center;
@@ -797,13 +805,15 @@ html[data-card-ui="in"] .card.placeholder .meta { min-height: 0; }
   background: #000;
   border-radius: 0;
   display: block;
+  vertical-align: top;
 }
 .video-resize-handle {
-  height: 10px;
-  margin-bottom: 12px;
-  border: 1px solid var(--line);
-  border-top: 0;
-  border-radius: 0 0 12px 12px;
+  position: relative;
+  z-index: 1;
+  height: 12px;
+  margin: -1px 0 0;
+  border: 0;
+  border-radius: 0;
   background: #000;
   cursor: ns-resize;
   display: flex;
@@ -1523,7 +1533,7 @@ kbd { background: var(--card); border-radius: 6px; padding: 2px 6px; color: var(
   }
   .video-resize-handle {
     height: 36px;
-    margin-bottom: 8px;
+    margin-top: -1px;
   }
   .video-resize-handle::after {
     width: 56px;
@@ -1616,7 +1626,8 @@ kbd { background: var(--card); border-radius: 6px; padding: 2px 6px; color: var(
   .detail-top #navInfo,
   .detail-top #repeatBtn,
   .detail-top #shuffleBtn { order: 10; }
-  .detail-video { height: 42vh; min-height: 180px; margin-top: 8px; }
+  .detail-stage { margin: 8px 0; }
+  .detail-video { height: 42vh; min-height: 180px; margin: 0; }
   .player-lower { grid-template-columns: 1fr; }
   .welcome, .sheet { margin: 28px auto; padding: 8px 16px 32px; }
   .welcome h1, .panel-title { font-size: 28px; }
