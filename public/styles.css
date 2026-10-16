@@ -82,7 +82,10 @@
 *::-webkit-scrollbar-thumb { background: var(--faint); border-radius: 99px; border: 2px solid transparent; background-clip: padding-box; }
 *::-webkit-scrollbar-track { background: transparent; }
 [hidden] { display: none !important; }
-html, body { height: 100%; }
+html, body {
+  height: 100%;
+  touch-action: manipulation; /* reduce mobile double-tap zoom */
+}
 body {
   margin: 0;
   color: var(--text);
@@ -92,9 +95,10 @@ body {
     radial-gradient(900px 420px at 0% -10%, var(--glow), transparent 55%),
     var(--bg);
   letter-spacing: 0.01em;
+  overscroll-behavior: none;
 }
 button, input, textarea { font: inherit; color: inherit; }
-button { cursor: pointer; }
+button { cursor: pointer; touch-action: manipulation; }
 a { color: inherit; }
 
 .app {
@@ -849,7 +853,19 @@ html[data-card-ui="in"] .card.placeholder .meta { min-height: 0; }
   padding: 0;
   flex: none;
 }
-.ctrl-btn:hover, .ctrl-btn.on, .icon-btn.on { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.ctrl-btn.on, .icon-btn.on {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+/* Avoid sticky :hover on touch — it made repeat/shuffle look stuck "on". */
+@media (hover: hover) and (pointer: fine) {
+  .ctrl-btn:hover, .icon-btn:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+}
 .ctrl-btn.danger:hover { color: var(--bad); border-color: var(--bad); }
 .ctrl-btn.ff-on { color: var(--accent); border-color: var(--accent); }
 .ctrl-label { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
@@ -882,6 +898,7 @@ html[data-card-ui="in"] .card.placeholder .meta { min-height: 0; }
   background: #000;
   display: flex;
   flex-direction: column;
+  touch-action: manipulation;
 }
 #douyinFeed {
   position: relative;
@@ -891,13 +908,16 @@ html[data-card-ui="in"] .card.placeholder .meta { min-height: 0; }
   display: flex;
   flex-direction: column;
   overflow-y: auto;
+  /* Simple page snap — same idea as Douyin / 小红书. */
   scroll-snap-type: y mandatory;
+  scroll-behavior: auto;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
   touch-action: pan-y;
   scrollbar-width: none;
   -ms-overflow-style: none;
 }
+#douyinFeed.no-snap { scroll-snap-type: none; }
 #douyinFeed::-webkit-scrollbar { display: none; width: 0; height: 0; }
 .douyin-slide {
   flex: 0 0 100%;
@@ -907,15 +927,21 @@ html[data-card-ui="in"] .card.placeholder .meta { min-height: 0; }
   scroll-snap-align: start;
   scroll-snap-stop: always;
   position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  overflow: hidden;
   background: #000;
   contain: layout style;
 }
 .douyin-slide.empty .douyin-meta,
 .douyin-slide.empty .douyin-speed-btn { display: none; }
-.douyin-slide video, .douyin-slide img { width: 100%; height: 100%; object-fit: contain; }
+.douyin-slide video, .douyin-slide img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  border-radius: 0;
+  background: #000;
+}
 .douyin-speed-btn { position: absolute; right: 16px; bottom: 36px; z-index: 2; min-width: 44px; height: 44px; border-radius: 22px; border: 1px solid rgba(255,255,255,.28); background: rgba(0,0,0,.45); color: #fff; }
 .douyin-speed-btn.on { color: var(--accent); border-color: var(--accent); }
 .douyin-meta { position: absolute; left: 16px; right: 78px; bottom: 24px; z-index: 2; color: #fff; }
@@ -923,10 +949,43 @@ html[data-card-ui="in"] .card.placeholder .meta { min-height: 0; }
 .douyin-progress i { display: block; height: 3px; width: 100%; background: rgba(255,255,255,.28); border-radius: 2px; position: relative; }
 .douyin-progress b { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 2px; }
 .douyin-name { font-size: 15px; font-weight: 650; text-shadow: 0 1px 4px rgba(0,0,0,.7); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.douyin-nav {
+  position: absolute;
+  right: max(10px, env(safe-area-inset-right));
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  pointer-events: none;
+}
+.douyin-nav button {
+  pointer-events: auto;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, .28);
+  background: rgba(0, 0, 0, .45);
+  color: rgba(255, 255, 255, .92);
+  display: grid;
+  place-items: center;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  padding: 0;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+.douyin-nav button svg { pointer-events: none; }
+.douyin-nav button:active {
+  background: rgba(255, 255, 255, .18);
+  transform: scale(0.96);
+}
 #douyinOverlay.ui-hidden .douyin-meta,
 #douyinOverlay.ui-hidden .douyin-speed-btn,
 #douyinOverlay.ui-hidden #douyinClose,
-#douyinOverlay.ui-hidden #douyinHint { opacity: 0; pointer-events: none; }
+#douyinOverlay.ui-hidden #douyinHint,
+#douyinOverlay.ui-hidden .douyin-nav { opacity: 0; pointer-events: none; }
 .snap-modal { position: fixed; inset: 0; z-index: 45; background: rgba(10, 8, 6, .72); display: grid; place-items: center; padding: 2vh 2vw; }
 .snap-box { width: 96vw; height: 94vh; background: var(--bg-2); border-radius: 18px; padding: 16px; padding-top: 44px; position: relative; display: flex; flex-direction: column; }
 .snap-box img { width: 100%; flex: 1; min-height: 0; max-height: none; object-fit: contain; background: #000; border-radius: 12px; }
@@ -1081,8 +1140,17 @@ html[data-card-ui="in"] .card.placeholder .meta { min-height: 0; }
   padding: 18px 16px 32px;
   padding-top: max(18px, env(safe-area-inset-top, 0px));
 }
-.history-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+.history-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 14px; }
 .history-head strong { font-family: Fraunces, Georgia, serif; font-size: 28px; font-weight: 560; }
+.history-head #clearHistory {
+  flex: none;
+  color: var(--bad);
+  border: 1px solid color-mix(in srgb, var(--bad) 35%, var(--line));
+  border-radius: 999px;
+  padding: 6px 12px;
+  min-height: 36px;
+}
+.text-btn.danger { color: var(--bad); }
 .history-group { border: 1px solid var(--line); border-radius: 16px; overflow: hidden; margin-bottom: 12px; background: var(--card); }
 .history-group-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; cursor: pointer; background: var(--card-2); }
 .history-group-name { flex: 1; min-width: 0; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1355,6 +1423,7 @@ kbd { background: var(--card); border-radius: 6px; padding: 2px 6px; color: var(
 }
 .card-prefs-row input[type="range"] { flex: 1; min-width: 0; }
 .card-prefs-actions { display: flex; gap: 8px; padding: 8px; flex-wrap: wrap; }
+#folderHistoryBtn.off { color: var(--faint); }
 .preview-row {
   display: flex;
   align-items: center;

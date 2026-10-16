@@ -717,26 +717,54 @@ function normalizeCardPrefs(raw) {
   const src = raw && typeof raw === 'object' ? raw : {};
   const ui = src.ui === 'in' ? 'in' : 'out';
   const fit = src.fit === 'cover' || src.fit === 'fit' ? 'cover' : 'contain';
-  return {
+  const out = {
     size: Math.min(560, Math.max(160, Number(src.size) || CARD_PREFS_DEFAULTS.size)),
     ratio: Math.min(200, Math.max(50, Number(src.ratio) || CARD_PREFS_DEFAULTS.ratio)),
     ui,
     fit,
     thumbTime: Math.min(180, Math.max(0, Number(src.thumbTime ?? src.time) || CARD_PREFS_DEFAULTS.thumbTime))
   };
+  // Keep explicit history flag when present (do not invent one here).
+  if (typeof src.history === 'boolean') out.history = src.history;
+  return out;
 }
-async function readCardPrefsFile(dirPath) {
+async function readCardPrefsRaw(dirPath) {
   try {
     const buf = await lease.readWhole(cardPrefsPath(dirPath), 64 * 1024);
-    return normalizeCardPrefs(JSON.parse(buf.toString('utf8')));
+    return JSON.parse(buf.toString('utf8'));
   } catch {
     return null;
   }
 }
+async function readCardPrefsFile(dirPath) {
+  const raw = await readCardPrefsRaw(dirPath);
+  return raw ? normalizeCardPrefs(raw) : null;
+}
 async function writeCardPrefsFile(dirPath, prefs) {
-  const next = normalizeCardPrefs(prefs);
+  const existing = (await readCardPrefsRaw(dirPath)) || {};
+  const merged = { ...existing, ...prefs };
+  const next = normalizeCardPrefs(merged);
   await lease.writeAtomic(cardPrefsPath(dirPath), JSON.stringify(next, null, 2) + '\n');
   return next;
+}
+async function resolveHistoryEnabled(dirPath) {
+  let cur = path.resolve(dirPath);
+  const seen = new Set();
+  while (cur && !seen.has(cur)) {
+    seen.add(cur);
+    const raw = await readCardPrefsRaw(cur);
+    if (raw && typeof raw.history === 'boolean') {
+      return { enabled: raw.history, from: cur };
+    }
+    const parent = path.dirname(cur);
+    if (parent === cur || !allowed(parent)) break;
+    cur = parent;
+  }
+  const excludes = readJson(FILES.exclude, []);
+  if (excludes.some((folder) => samePath(dirPath, folder) || lease.hits(folder, dirPath))) {
+    return { enabled: false, from: 'exclude' };
+  }
+  return { enabled: true, from: '' };
 }
 async function resolveCardPrefs(dirPath) {
   let cur = path.resolve(dirPath);
@@ -786,6 +814,28 @@ app.put('/api/card-prefs', async (req, res) => {
   try {
     const prefs = await writeCardPrefsFile(dirPath, req.body);
     res.json({ success: true, prefs });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+app.get('/api/folder-history', async (req, res) => {
+  const dirPath = needPath(req, res);
+  if (!dirPath) return;
+  try {
+    const data = await resolveHistoryEnabled(dirPath);
+    res.json({ enabled: data.enabled, from: data.from });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+app.put('/api/folder-history', async (req, res) => {
+  const dirPath = req.body?.path;
+  if (!dirPath) return res.status(400).json({ error: '缺少路径' });
+  if (!allowed(dirPath)) return res.status(403).json({ error: '该路径不在白名单中' });
+  const enabled = req.body?.enabled !== false;
+  try {
+    const prefs = await writeCardPrefsFile(dirPath, { history: enabled });
+    res.json({ success: true, enabled: prefs.history !== false, prefs });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1774,13 +1824,21 @@ app.delete('/api/tricks/:id', async (req, res) => {
 });
 
 app.get('/api/play-history', (_req, res) => res.json(readJson(FILES.history, [])));
-app.post('/api/play-history', (req, res) => {
+app.post('/api/play-history', async (req, res) => {
   const trickId = req.body?.trickId;
   if (!trickId) return res.status(400).json({ error: '缺少 trickId' });
   const excludes = readJson(FILES.exclude, []);
   if (excludes.some((folder) => samePath(trickId, folder) || lease.hits(folder, trickId))) {
     return res.json({ success: true, excluded: true });
   }
+  try {
+    // Folder .tv2-card.json history flag applies to itself and descendants.
+    const folder = path.dirname(trickId);
+    if (folder && allowed(folder)) {
+      const hist = await resolveHistoryEnabled(folder);
+      if (!hist.enabled) return res.json({ success: true, excluded: true, from: hist.from });
+    }
+  } catch { /* fall through and record */ }
   let history = readJson(FILES.history, []);
   const existing = history.find((row) => samePath(row.trickId, trickId));
   if (existing) {

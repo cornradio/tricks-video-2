@@ -33,6 +33,8 @@ const state = {
   convertPick: '',
   convertCommand: '',
   convertPreview: null,
+  gridShuffleRank: new Map(),
+  folderHistory: true,
   local: { root: null, map: new Map(), tree: [], folder: '', files: [] },
   thumbToken: 0,
   listSeq: 0,
@@ -303,19 +305,67 @@ function resetShuffleCycle() {
   state.shuffleBack = [];
   state.shuffleSeen = new Set();
 }
+function reshuffleGridOrder() {
+  state.gridShuffleRank = new Map();
+}
 function visibleFiles(files) {
   const words = state.query.trim().toLowerCase().split(/\s+/).filter(Boolean);
   const rank = new Map(state.history.map((row, index) => [row.trickId, index]));
-  return files.filter((file) => {
+  const list = files.filter((file) => {
     if (state.filter !== 'all' && file.type !== state.filter) return false;
     return matchesQuery([file.name, file.note, file.notes], words);
-  }).sort((a, b) => {
+  });
+  if (state.sort === 'shuffle') {
+    for (const file of list) {
+      const key = itemKey(file);
+      if (!state.gridShuffleRank.has(key)) state.gridShuffleRank.set(key, Math.random());
+    }
+    return list.sort((a, b) => (state.gridShuffleRank.get(itemKey(a)) || 0) - (state.gridShuffleRank.get(itemKey(b)) || 0));
+  }
+  return list.sort((a, b) => {
     if (state.sort === 'name_desc') return b.name.localeCompare(a.name, 'zh');
     if (state.sort === 'time_desc') return (b.birthtime || 0) - (a.birthtime || 0);
     if (state.sort === 'time_asc') return (a.birthtime || 0) - (b.birthtime || 0);
     if (state.sort === 'recent') return (rank.get(a.path) ?? 9999) - (rank.get(b.path) ?? 9999);
     return a.name.localeCompare(b.name, 'zh');
   });
+}
+function syncFolderHistoryBtn() {
+  const btn = $('folderHistoryBtn');
+  if (!btn) return;
+  const on = state.folderHistory !== false;
+  btn.textContent = on ? '历史记录(开)' : '历史记录(关)';
+  btn.classList.toggle('off', !on);
+  btn.title = on
+    ? '此文件夹及子文件夹会写入播放历史（点按关闭）'
+    : '此文件夹及子文件夹不写播放历史（点按开启）';
+}
+async function loadFolderHistory(folder = state.folder) {
+  if (!folder) {
+    state.folderHistory = true;
+    syncFolderHistoryBtn();
+    return true;
+  }
+  try {
+    const data = await api('/api/folder-history?' + qs({ path: folder }));
+    state.folderHistory = data.enabled !== false;
+  } catch {
+    state.folderHistory = true;
+  }
+  syncFolderHistoryBtn();
+  return state.folderHistory;
+}
+async function toggleFolderHistory() {
+  if (!state.folder) return toast('先打开一个文件夹');
+  const next = state.folderHistory === false;
+  const data = await api('/api/folder-history', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: state.folder, enabled: next })
+  });
+  state.folderHistory = data.enabled !== false;
+  syncFolderHistoryBtn();
+  toast(state.folderHistory ? '已开启此文件夹历史记录' : '已关闭此文件夹历史记录（含子文件夹）');
 }
 
 function folderBase(dir) {
@@ -646,7 +696,8 @@ async function selectFolder(dir, opts = {}) {
   $('grid').innerHTML = '<div class="empty">正在列出文件…</div>';
   const [data, prefs] = await Promise.all([
     api('/api/files?' + qs({ path: dir })),
-    loadCardPrefs(dir)
+    loadCardPrefs(dir),
+    loadFolderHistory(dir)
   ]);
   if (seq !== state.listSeq) return;
   state.files = data.files || [];
@@ -1701,13 +1752,19 @@ function renderHistory() {
       </div>
     </div>
   `).join('');
-  $('historyPop').innerHTML = `<div class="history-head"><strong>播放历史</strong><button class="text-btn" id="clearHistory" type="button">清空</button></div>${body || '<div class="empty">还没有播放记录。</div>'}`;
+  $('historyPop').innerHTML = `<div class="history-head">
+    <strong>播放历史</strong>
+    <button class="text-btn danger" id="clearHistory" type="button">清空全部</button>
+  </div>${body || '<div class="empty">还没有播放记录。</div>'}`;
   $('historyPop').querySelectorAll('img').forEach((img) => { img.onerror = () => { img.remove(); }; });
   $('clearHistory').onclick = async (event) => {
+    event.preventDefault();
     event.stopPropagation();
+    if (!(await confirmAction('清空全部播放历史？', { ok: '清空', cancel: '取消' }))) return;
     await api('/api/play-history', { method: 'DELETE' });
     state.history = [];
     renderHistory();
+    toast('已清空全部历史');
   };
   $('historyPop').onclick = async (event) => {
     const head = event.target.closest('.history-group-head');
@@ -2703,6 +2760,8 @@ let douyinUnlockTimer = 0;
 let douyinOnScroll = null;
 let douyinOnScrollEnd = null;
 let douyinOnWheel = null;
+const douyinWarmKeys = new Set();
+const douyinWarmAbort = new Map();
 
 function douyinMediaUrl(item) {
   if (!item) return '';
@@ -2710,12 +2769,66 @@ function douyinMediaUrl(item) {
   if (item.path) return '/api/play?' + qs({ path: item.path });
   return '';
 }
+function douyinItemKey(item) {
+  if (!item) return '';
+  return item.path || item.videoPath || item.id || item.key || '';
+}
 function clearDouyinVideo(vid) {
   if (!vid) return;
   vid.pause();
+  vid.muted = true;
   vid.removeAttribute('src');
   vid.removeAttribute('data-src');
+  vid.removeAttribute('data-role');
   try { vid.load(); } catch { /* ok */ }
+}
+/** Only the visible page may have sound; mute everyone else immediately. */
+function silenceDouyinExcept(keepVid) {
+  const feed = $('douyinFeed');
+  if (!feed) return;
+  feed.querySelectorAll('video').forEach((vid) => {
+    if (vid === keepVid) return;
+    if (!vid.muted) vid.muted = true;
+  });
+}
+/** Tie audible video to the nearest snap page while the finger is still scrolling (keeps iOS unmute in-gesture). */
+function syncDouyinAudibleFromScroll() {
+  const feed = $('douyinFeed');
+  if (!feed || $('douyinOverlay')?.hidden) return;
+  const h = douyinPageHeight();
+  if (h < 8 || !feed.children.length) return;
+  const page = Math.max(0, Math.min(feed.children.length - 1, Math.round(feed.scrollTop / h)));
+  for (let i = 0; i < feed.children.length; i++) {
+    const vid = feed.children[i].querySelector('video');
+    if (!vid?.dataset.src) continue;
+    if (i === page) {
+      silenceDouyinExcept(vid);
+      vid.muted = false;
+      if (vid.paused) vid.play().catch(() => {});
+    } else if (!vid.muted) {
+      vid.muted = true;
+    }
+  }
+}
+function warmDouyinItem(item) {
+  if (!item?.path) return;
+  const key = item.path;
+  if (douyinWarmKeys.has(key)) return;
+  douyinWarmKeys.add(key);
+  const ctrl = new AbortController();
+  douyinWarmAbort.set(key, ctrl);
+  // Kick remux + cache a short head so the slot can attach without a cold start.
+  fetch('/api/play?' + qs({ path: key }), {
+    headers: { Range: 'bytes=0-524287' },
+    signal: ctrl.signal
+  }).then((res) => (res.ok || res.status === 206) ? res.arrayBuffer() : null).catch(() => {}).finally(() => {
+    douyinWarmAbort.delete(key);
+  });
+}
+function clearDouyinWarms() {
+  douyinWarmAbort.forEach((ctrl) => { try { ctrl.abort(); } catch { /* ok */ } });
+  douyinWarmAbort.clear();
+  douyinWarmKeys.clear();
 }
 function bindDouyinVideo(vid, item, play) {
   const src = douyinMediaUrl(item);
@@ -2723,15 +2836,40 @@ function bindDouyinVideo(vid, item, play) {
     clearDouyinVideo(vid);
     return;
   }
-  if (vid.dataset.src !== src) {
+  const same = vid.dataset.src === src;
+  if (!same) {
     vid.dataset.src = src;
-    vid.preload = play ? 'auto' : 'metadata';
+    vid.preload = 'auto';
+    vid.setAttribute('preload', 'auto');
     vid.src = src;
+    try { vid.load(); } catch { /* ok */ }
+  } else {
+    vid.preload = 'auto';
+    vid.setAttribute('preload', 'auto');
   }
   vid.loop = true;
-  vid.playbackRate = 1;
-  if (play) vid.play().catch(() => {});
-  else vid.pause();
+  vid.dataset.role = play ? 'current' : 'buffer';
+  if (play) {
+    silenceDouyinExcept(vid);
+    vid.muted = false;
+    if (!same && vid.currentTime > 0.05) {
+      try { vid.currentTime = 0; } catch { /* ok */ }
+    }
+    vid.play().catch(() => {});
+  } else {
+    // Keep decoder warm: silent play-then-pause forces real media buffer on many browsers.
+    vid.muted = true;
+    const kick = vid.play();
+    if (kick && typeof kick.then === 'function') {
+      kick.then(() => {
+        if (vid.dataset.role !== 'buffer' || vid.dataset.src !== src) return;
+        vid.pause();
+        try { if (vid.currentTime > 0.2) vid.currentTime = 0; } catch { /* ok */ }
+      }).catch(() => { vid.pause(); });
+    } else {
+      vid.pause();
+    }
+  }
 }
 function makeDouyinSlide() {
   const slide = document.createElement('div');
@@ -2740,7 +2878,8 @@ function makeDouyinSlide() {
   vid.playsInline = true;
   vid.setAttribute('playsinline', '');
   vid.setAttribute('webkit-playsinline', '');
-  vid.preload = 'none';
+  vid.preload = 'auto';
+  vid.setAttribute('preload', 'auto');
   vid.loop = true;
   const speed = document.createElement('button');
   speed.type = 'button';
@@ -2769,13 +2908,28 @@ function paintDouyinSlide(slide, item, play) {
   const bar = slide.querySelector('.douyin-progress b');
   slide.classList.toggle('empty', !item);
   if (name) name.textContent = item ? (item.name || '') : '';
-  if (bar) bar.style.width = '0%';
+  if (bar && (!item || vid?.dataset.src !== douyinMediaUrl(item))) bar.style.width = '0%';
   if (speed) {
-    speed.textContent = '1x';
-    speed.classList.remove('on');
+    if (!item || vid?.dataset.src !== douyinMediaUrl(item)) {
+      speed.textContent = '1x';
+      speed.classList.remove('on');
+    }
     speed.hidden = !item;
   }
   bindDouyinVideo(vid, item, play);
+}
+function syncDouyinSlideMeta(slide, item) {
+  const name = slide.querySelector('.douyin-name');
+  const speed = slide.querySelector('.douyin-speed-btn');
+  const vid = slide.querySelector('video');
+  slide.classList.toggle('empty', !item);
+  if (name) name.textContent = item ? (item.name || '') : '';
+  if (speed) {
+    const rate = vid && vid.playbackRate === 2 ? 2 : 1;
+    speed.textContent = rate === 2 ? '2x' : '1x';
+    speed.classList.toggle('on', rate === 2);
+    speed.hidden = !item;
+  }
 }
 function douyinPageHeight() {
   return $('douyinFeed')?.clientHeight || window.innerHeight || 1;
@@ -2788,8 +2942,24 @@ function lockDouyin(ms = 160) {
 function centerDouyinFeed() {
   const feed = $('douyinFeed');
   if (!feed) return;
-  lockDouyin(180);
+  // Jump to middle slot; briefly disable snap so iOS doesn't fight the reset.
+  lockDouyin(420);
+  feed.classList.add('no-snap');
   feed.scrollTop = douyinPageHeight();
+  requestAnimationFrame(() => {
+    feed.scrollTop = douyinPageHeight();
+    requestAnimationFrame(() => feed.classList.remove('no-snap'));
+  });
+}
+function warmDouyinNeighbors() {
+  const n = douyinItems.length;
+  if (n < 2) return;
+  const next = douyinItems[(douyinIndex + 1) % n];
+  const prev = douyinItems[(douyinIndex - 1 + n) % n];
+  const next2 = n > 2 ? douyinItems[(douyinIndex + 2) % n] : null;
+  warmDouyinItem(next);
+  warmDouyinItem(prev);
+  if (next2 && douyinItemKey(next2) !== douyinItemKey(next)) warmDouyinItem(next2);
 }
 function fillDouyinWindow(index) {
   const n = douyinItems.length;
@@ -2797,22 +2967,52 @@ function fillDouyinWindow(index) {
   if (!feed || feed.children.length < 3 || !n) return;
   douyinIndex = ((index % n) + n) % n;
   const cur = douyinItems[douyinIndex] || null;
-  // Loop: last's next is first, first's prev is last.
   const prev = n > 1 ? douyinItems[(douyinIndex - 1 + n) % n] : null;
   const next = n > 1 ? douyinItems[(douyinIndex + 1) % n] : null;
   paintDouyinSlide(feed.children[0], prev, false);
   paintDouyinSlide(feed.children[1], cur, true);
   paintDouyinSlide(feed.children[2], next, false);
+  warmDouyinNeighbors();
 }
-function stepDouyin(dir) {
-  if (douyinLock || douyinStepLock || $('douyinOverlay').hidden) return false;
+function stepDouyin(dir, opts = {}) {
+  const force = !!opts.force;
+  // Scroll locks ignore residual fling; explicit UI (buttons) must still work.
+  if ((!force && (douyinLock || douyinStepLock)) || $('douyinOverlay').hidden) return false;
+  if (force && douyinStepLock) return false;
   const n = douyinItems.length;
+  const feed = $('douyinFeed');
   if (n <= 1) {
     centerDouyinFeed();
     return false;
   }
+  if (!feed || feed.children.length < 3) return false;
   douyinStepLock = true;
-  fillDouyinWindow(douyinIndex + dir);
+  douyinLock = false;
+  clearTimeout(douyinUnlockTimer);
+  if (dir > 0) {
+    douyinIndex = (douyinIndex + 1) % n;
+    feed.appendChild(feed.children[0]);
+    const prev = douyinItems[(douyinIndex - 1 + n) % n];
+    const cur = douyinItems[douyinIndex];
+    const next = douyinItems[(douyinIndex + 1) % n];
+    syncDouyinSlideMeta(feed.children[0], prev);
+    bindDouyinVideo(feed.children[0].querySelector('video'), prev, false);
+    syncDouyinSlideMeta(feed.children[1], cur);
+    bindDouyinVideo(feed.children[1].querySelector('video'), cur, true);
+    paintDouyinSlide(feed.children[2], next, false);
+  } else {
+    douyinIndex = (douyinIndex - 1 + n) % n;
+    feed.insertBefore(feed.children[2], feed.children[0]);
+    const prev = douyinItems[(douyinIndex - 1 + n) % n];
+    const cur = douyinItems[douyinIndex];
+    const next = douyinItems[(douyinIndex + 1) % n];
+    paintDouyinSlide(feed.children[0], prev, false);
+    syncDouyinSlideMeta(feed.children[1], cur);
+    bindDouyinVideo(feed.children[1].querySelector('video'), cur, true);
+    syncDouyinSlideMeta(feed.children[2], next);
+    bindDouyinVideo(feed.children[2].querySelector('video'), next, false);
+  }
+  warmDouyinNeighbors();
   centerDouyinFeed();
   setTimeout(() => { douyinStepLock = false; }, 320);
   return true;
@@ -2822,19 +3022,20 @@ function settleDouyinScroll() {
   const feed = $('douyinFeed');
   const h = douyinPageHeight();
   if (!feed || h < 8) return;
+  // Wait for CSS snap to finish, then recycle the 3-slot window.
   const page = Math.round(feed.scrollTop / h);
   if (page === 1) return;
   if (page <= 0) {
     if (!stepDouyin(-1)) {
       lockDouyin(220);
-      feed.scrollTo({ top: h, behavior: 'smooth' });
+      feed.scrollTop = h;
     }
     return;
   }
   if (page >= 2) {
     if (!stepDouyin(1)) {
       lockDouyin(220);
-      feed.scrollTo({ top: h, behavior: 'smooth' });
+      feed.scrollTop = h;
     }
   }
 }
@@ -2860,7 +3061,11 @@ function leaveDouyin(opts = {}) {
   douyinStepLock = false;
   douyinItems = [];
   douyinIndex = 0;
-  if (feed) feed.onclick = null;
+  clearDouyinWarms();
+  if (feed) {
+    feed.classList.remove('no-snap');
+    feed.onclick = null;
+  }
   requestAnimationFrame(() => {
     if (!feed) return;
     feed.querySelectorAll('video').forEach(clearDouyinVideo);
@@ -2886,8 +3091,11 @@ function enterDouyin() {
   if (douyinOnWheel) feed.removeEventListener('wheel', douyinOnWheel);
   clearTimeout(douyinScrollTimer);
   clearTimeout(douyinUnlockTimer);
+  clearDouyinWarms();
   douyinLock = false;
   douyinStepLock = false;
+  feed.classList.remove('no-snap');
+  feed.querySelectorAll('video').forEach(clearDouyinVideo);
   feed.innerHTML = '';
   douyinItems = list;
 
@@ -2937,13 +3145,23 @@ function enterDouyin() {
     if (event.deltaY > 2) stepDouyin(1);
     else if (event.deltaY < -2) stepDouyin(-1);
   };
+  let douyinAudioRaf = 0;
   douyinOnScroll = () => {
+    // Switch sound with the visible page during the gesture (stops old audio + unlocks new on iOS).
+    if (!douyinAudioRaf) {
+      douyinAudioRaf = requestAnimationFrame(() => {
+        douyinAudioRaf = 0;
+        if (!douyinLock && !douyinStepLock) syncDouyinAudibleFromScroll();
+      });
+    }
     if (douyinLock || douyinStepLock) return;
     clearTimeout(douyinScrollTimer);
+    // Backup when scrollend is missing; wait for snap to settle.
     douyinScrollTimer = setTimeout(settleDouyinScroll, 120);
   };
   douyinOnScrollEnd = () => {
     clearTimeout(douyinScrollTimer);
+    if (!douyinLock && !douyinStepLock) syncDouyinAudibleFromScroll();
     settleDouyinScroll();
   };
   feed.addEventListener('wheel', douyinOnWheel, { passive: false });
@@ -3219,10 +3437,16 @@ function wire() {
   $('sortSeg').onclick = (event) => {
     const button = event.target.closest('[data-sort]');
     if (!button) return;
-    state.sort = button.dataset.sort;
+    const next = button.dataset.sort;
+    if (next === 'shuffle' && state.sort === 'shuffle') reshuffleGridOrder();
+    else if (next === 'shuffle') reshuffleGridOrder();
+    state.sort = next;
     localStorage.setItem('tv2-sort', state.sort);
     syncSortButtons();
     renderGrid();
+  };
+  $('folderHistoryBtn').onclick = () => {
+    toggleFolderHistory().catch((err) => toast(err.message));
   };
   $('filterSeg').onclick = (event) => {
     const button = event.target.closest('[data-filter]');
@@ -3378,13 +3602,14 @@ function wire() {
   $('repeatBtn').onclick = () => {
     state.repeat = state.repeat === 'one' ? 'all' : 'one';
     localStorage.setItem('tv2-repeat', state.repeat);
-    syncSortButtons();
+    updateChrome();
+    toast(state.repeat === 'one' ? '单曲循环已开' : '单曲循环已关');
   };
   $('shuffleBtn').onclick = () => {
     state.shuffle = !state.shuffle;
     resetShuffleCycle();
     localStorage.setItem('tv2-shuffle', state.shuffle ? '1' : '0');
-    syncSortButtons();
+    updateChrome();
     toast(state.shuffle ? '随机已开（播完一轮才重复）' : '随机已关');
   };
   $('detailDelete').onclick = () => deleteCurrentAndContinue();
@@ -3440,6 +3665,29 @@ function wire() {
   $('douyinClose').addEventListener('pointerdown', (event) => {
     event.stopPropagation();
   });
+  const bindDouyinNavBtn = (id, dir) => {
+    const btn = $(id);
+    if (!btn) return;
+    btn.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      stepDouyin(dir, { force: true });
+    });
+    btn.addEventListener('pointerdown', (event) => {
+      event.stopPropagation();
+    });
+  };
+  bindDouyinNavBtn('douyinPrev', -1);
+  bindDouyinNavBtn('douyinNext', 1);
+  $('douyinNav')?.addEventListener('pointerdown', (event) => event.stopPropagation());
+  // iOS Safari: block double-tap zoom (viewport + touch-action don't always cover it).
+  let lastTouchEnd = 0;
+  document.addEventListener('touchend', (event) => {
+    const now = Date.now();
+    if (now - lastTouchEnd <= 280) event.preventDefault();
+    lastTouchEnd = now;
+  }, { passive: false });
+  document.addEventListener('gesturestart', (event) => event.preventDefault());
   $('playerMenuBtn').onclick = (event) => { event.stopPropagation(); playerMore(); };
   $('streamMenuBtn').onclick = (event) => {
     event.stopPropagation();

@@ -2,7 +2,7 @@
 <html lang="zh-CN" data-mode="dark" data-accent="ember">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#1a1612">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Tricks Video">
@@ -55,6 +55,7 @@ try {
       <button type="button" data-sort="time_desc">新</button>
       <button type="button" data-sort="time_asc">旧</button>
       <button type="button" data-sort="recent">最近</button>
+      <button type="button" data-sort="shuffle">乱序</button>
     </div>
     <button class="icon-btn" id="douyinBtn" type="button" title="抖音模式（上下滑动）">抖音模式</button>
     <button class="icon-btn" id="historyBtn" type="button" title="播放历史">历史</button>
@@ -110,6 +111,7 @@ try {
             <button type="button" data-filter="image">图片</button>
           </div>
           <button class="text-btn" id="cardPrefsBtn" type="button">卡片设置</button>
+          <button class="text-btn" id="folderHistoryBtn" type="button" title="此文件夹及子文件夹是否写入播放历史">历史记录(开)</button>
           <button class="text-btn" id="uploadBtn" type="button">上传</button>
           <input id="uploadInput" type="file" accept="video/*,image/*" multiple hidden>
         </div>
@@ -349,8 +351,16 @@ try {
 <div id="toast" class="toast"></div>
 <div id="douyinOverlay" hidden>
   <button id="douyinClose" type="button" title="退出">×</button>
-  <div id="douyinHint">中间暂停 · 两侧隐藏界面 · 上下滑动</div>
+  <div id="douyinHint">中间暂停 · 两侧隐藏界面 · 上下滑动或点右侧按钮</div>
   <div id="douyinFeed"></div>
+  <div class="douyin-nav" id="douyinNav">
+    <button type="button" id="douyinPrev" title="上一个" aria-label="上一个">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="18 15 12 9 6 15"/></svg>
+    </button>
+    <button type="button" id="douyinNext" title="下一个" aria-label="下一个">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+    </button>
+  </div>
 </div>
 <script src="/app.js"></script>
 </body>
