@@ -891,6 +891,46 @@ html[data-card-ui="in"] .card.placeholder .meta { min-height: 0; }
 }
 .notes-section.show, .clips-section.show { display: block; }
 .notes textarea, #notes { width: 100%; min-height: 120px; margin-top: 8px; background: var(--bg); }
+#infoBtn {
+  font-family: Georgia, 'Times New Roman', serif;
+  font-style: italic;
+  font-weight: 700;
+  font-size: 15px;
+}
+.info-body { margin-top: 8px; }
+.info-grid { display: grid; gap: 6px 12px; }
+.info-row {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.info-row span { color: var(--muted); }
+.info-row b {
+  font-weight: 550;
+  word-break: break-all;
+  color: var(--text);
+}
+.sidecar-warn {
+  margin: 0 8px 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.sidecar-warn ul { margin: 6px 0 8px; padding-left: 1.2em; }
+.sidecar-warn li { margin: 2px 0; }
+.sidecar-warn code {
+  font-size: 11px;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--card) 70%, transparent);
+}
 #douyinOverlay {
   position: fixed;
   inset: 0;

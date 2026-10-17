@@ -1182,6 +1182,65 @@ app.get('/api/probe', (req, res) => {
   });
 });
 
+app.get('/api/file-info', async (req, res) => {
+  const filePath = needPath(req, res);
+  if (!filePath) return;
+  let stat;
+  try { stat = await fsp.stat(filePath); }
+  catch (err) { return res.status(404).json({ error: err.code === 'ENOENT' ? '文件不存在' : err.message }); }
+  if (!stat.isFile()) return res.status(400).json({ error: '不是文件' });
+  const ext = path.extname(filePath).toLowerCase();
+  const info = {
+    name: path.basename(filePath),
+    path: filePath,
+    size: stat.size,
+    mtime: stat.mtimeMs,
+    birthtime: stat.birthtimeMs || stat.mtimeMs,
+    ext,
+    type: IMAGE_EXTS.has(ext) ? 'image' : (VIDEO_EXTS.has(ext) ? 'video' : 'file')
+  };
+  if (VIDEO_EXTS.has(ext) || IMAGE_EXTS.has(ext)) {
+    try {
+      const probed = await runCommand('ffprobe', [
+        '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', filePath
+      ], [filePath], 12000);
+      const data = JSON.parse(probed.stdout || '{}');
+      const format = data.format || {};
+      const streams = Array.isArray(data.streams) ? data.streams : [];
+      const video = streams.find((s) => s.codec_type === 'video' && s.disposition?.attached_pic !== 1) || streams.find((s) => s.codec_type === 'video');
+      const audio = streams.find((s) => s.codec_type === 'audio');
+      info.duration = Number(format.duration) || (video ? Number(video.duration) : 0) || 0;
+      info.bitrate = Number(format.bit_rate) || 0;
+      info.formatName = String(format.format_long_name || format.format_name || '').trim();
+      info.container = String(format.format_name || '').trim();
+      if (video) {
+        info.width = Number(video.width) || 0;
+        info.height = Number(video.height) || 0;
+        info.videoCodec = String(video.codec_long_name || video.codec_name || '').trim();
+        info.videoCodecTag = String(video.codec_name || '').trim();
+        info.pixFmt = String(video.pix_fmt || '').trim();
+        const fpsRaw = video.avg_frame_rate || video.r_frame_rate || '';
+        if (typeof fpsRaw === 'string' && fpsRaw.includes('/')) {
+          const [a, b] = fpsRaw.split('/').map(Number);
+          info.fps = b ? Math.round((a / b) * 1000) / 1000 : 0;
+        } else info.fps = Number(fpsRaw) || 0;
+      }
+      if (audio) {
+        info.audioCodec = String(audio.codec_long_name || audio.codec_name || '').trim();
+        info.audioCodecTag = String(audio.codec_name || '').trim();
+        info.sampleRate = Number(audio.sample_rate) || 0;
+        info.channels = Number(audio.channels) || 0;
+        info.channelLayout = String(audio.channel_layout || '').trim();
+        info.audioBitrate = Number(audio.bit_rate) || 0;
+      }
+      info.streamCount = streams.length;
+    } catch {
+      /* ffprobe optional — basic stat still returned */
+    }
+  }
+  res.json(info);
+});
+
 app.get('/api/convert/file', async (req, res) => {
   const filePath = needPath(req, res);
   if (!filePath) return;

@@ -60,9 +60,10 @@ function dirname(filePath) {
   return index > 0 ? filePath.slice(0, index) : filePath;
 }
 function formatSize(bytes) {
-  if (!bytes) return '';
-  const units = ['B', 'KB', 'MB', 'GB'];
-  let size = bytes;
+  if (bytes == null || bytes === '') return '';
+  let size = Number(bytes);
+  if (!Number.isFinite(size) || size < 0) return '';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
   let index = 0;
   while (size >= 1024 && index < units.length - 1) { size /= 1024; index += 1; }
   return (index ? size.toFixed(size < 10 ? 1 : 0) : size) + ' ' + units[index];
@@ -71,6 +72,51 @@ function clock(seconds) {
   if (seconds == null || !Number.isFinite(Number(seconds))) return '—';
   const whole = Math.max(0, Math.floor(Number(seconds)));
   return Math.floor(whole / 60) + ':' + String(whole % 60).padStart(2, '0');
+}
+function formatDurationLong(seconds) {
+  if (seconds == null || !Number.isFinite(Number(seconds)) || Number(seconds) <= 0) return '—';
+  const whole = Math.floor(Number(seconds));
+  const h = Math.floor(whole / 3600);
+  const m = Math.floor((whole % 3600) / 60);
+  const s = whole % 60;
+  if (h) return h + ':' + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+  return m + ':' + String(s).padStart(2, '0');
+}
+function formatBitrate(bps) {
+  const n = Number(bps) || 0;
+  if (n <= 0) return '';
+  if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + ' Mbps';
+  if (n >= 1e3) return Math.round(n / 1e3) + ' kbps';
+  return n + ' bps';
+}
+function formatInfoTime(ms) {
+  const n = Number(ms) || 0;
+  if (!n) return '—';
+  try {
+    return new Date(n).toLocaleString('zh-CN', { hour12: false });
+  } catch { return '—'; }
+}
+function noSidecars() {
+  return localStorage.getItem('tv2-no-sidecars') === '1';
+}
+function sidecarLossHtml() {
+  return `
+    <div class="sidecar-warn">
+      <div>开启后<strong>不会</strong>在媒体文件夹里再写入这些点开头文件：</div>
+      <ul>
+        <li><code>.tv2-card.json</code> — 卡片大小 / 比例 / 封面秒数、文件夹历史开关</li>
+        <li><code>.TThumb.PNG</code> — 文件夹自定义封面</li>
+      </ul>
+      <div>相应会缺少：</div>
+      <ul>
+        <li>卡片设置只保存在本浏览器，换设备或清缓存会丢</li>
+        <li>不能再把文件夹封面写进目录（粘贴/上传封面会提示跳过）</li>
+        <li>「历史记录开/关」改走排除列表，不再写进 <code>.tv2-card.json</code></li>
+        <li>「应用到子文件夹 / 资料库全部」不可用（会污染大量目录）</li>
+      </ul>
+      <div class="sub">备注 <code>*.notes.txt</code> 仍会按原样保存（不是点开头文件）。</div>
+    </div>
+  `;
 }
 function isMediaName(name) {
   return /\.(mp4|webm|mov|avi|mkv|wmv|flv|m4v|ts|m2ts|jpg|jpeg|png|webp|gif|bmp|avif)$/i.test(name);
@@ -358,6 +404,18 @@ async function loadFolderHistory(folder = state.folder) {
 async function toggleFolderHistory() {
   if (!state.folder) return toast('先打开一个文件夹');
   const next = state.folderHistory === false;
+  // Clean mode: don't write .tv2-card.json — use the global exclude list instead.
+  if (noSidecars()) {
+    await api('/api/history-exclude', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: state.folder, action: next ? 'remove' : 'add' })
+    });
+    state.folderHistory = next;
+    syncFolderHistoryBtn();
+    toast(state.folderHistory ? '已开启此文件夹历史记录' : '已关闭此文件夹历史记录（排除列表）');
+    return;
+  }
   const data = await api('/api/folder-history', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -585,6 +643,7 @@ function renderFolderHead() {
     remove.onclick = async (event) => {
       event.preventDefault();
       event.stopPropagation();
+      if (noSidecars()) return toast('已开启「禁止导出拉屎」，不删除目录内的 .TThumb.PNG');
       try {
         await api('/api/folder-thumb?' + qs({ path: info.path || state.folder }), { method: 'DELETE' });
         state.folderInfo.hasThumb = false;
@@ -600,6 +659,10 @@ function renderFolderHead() {
   $('coverInput').onchange = async () => {
     const file = $('coverInput').files[0];
     if (!file) return;
+    if (noSidecars()) {
+      $('coverInput').value = '';
+      return toast('已开启「禁止导出拉屎」，不会写入 .TThumb.PNG');
+    }
     const body = new FormData();
     body.append('thumb', file);
     body.append('folderPath', state.folder);
@@ -828,6 +891,21 @@ function clearLegacyCardPrefs() {
   localStorage.removeItem('tv2-card-size');
   localStorage.removeItem('tv2-card-ratio');
 }
+function readLocalCardPrefsMap() {
+  try { return JSON.parse(localStorage.getItem('tv2-card-prefs') || '{}'); } catch { return {}; }
+}
+function saveLocalCardPrefs(folder, prefs) {
+  if (!folder) return;
+  const map = readLocalCardPrefsMap();
+  map[folder] = {
+    size: prefs.size,
+    ratio: prefs.ratio,
+    ui: prefs.ui,
+    fit: prefs.fit,
+    thumbTime: prefs.thumbTime
+  };
+  localStorage.setItem('tv2-card-prefs', JSON.stringify(map));
+}
 function readCardPrefs() {
   return normalizeCardPrefs(state.cardPrefs || CARD_DEFAULTS);
 }
@@ -839,6 +917,19 @@ async function loadCardPrefs(folder) {
   if (!folder) {
     state.cardPrefs = { ...CARD_DEFAULTS };
     return state.cardPrefs;
+  }
+  // Clean mode: never write .tv2-card.json; prefs live in this browser only.
+  if (noSidecars()) {
+    const local = readLegacyCardPrefs(folder);
+    if (local) {
+      state.cardPrefs = normalizeCardPrefs({ ...local, source: 'local', from: folder });
+      state.thumbTime = state.cardPrefs.thumbTime;
+      return state.cardPrefs;
+    }
+    const remote = normalizeCardPrefs(await api('/api/card-prefs?' + qs({ path: folder })).catch(() => CARD_DEFAULTS));
+    state.cardPrefs = remote;
+    state.thumbTime = remote.thumbTime;
+    return remote;
   }
   let prefs = normalizeCardPrefs(await api('/api/card-prefs?' + qs({ path: folder })).catch(() => CARD_DEFAULTS));
   if (prefs.source === 'default' || prefs.source === 'legacy') {
@@ -867,6 +958,10 @@ async function writeCardPrefs(partial, folder = state.folder) {
   state.cardPrefs = next;
   state.thumbTime = next.thumbTime;
   applyCardPrefs(next);
+  if (noSidecars()) {
+    saveLocalCardPrefs(folder, next);
+    return;
+  }
   try {
     const data = await api('/api/card-prefs', {
       method: 'PUT',
@@ -879,6 +974,7 @@ async function writeCardPrefs(partial, folder = state.folder) {
 async function applyCardPrefsToSubfolders() {
   const base = state.folder;
   if (!base) return toast('先打开一个文件夹');
+  if (noSidecars()) return toast('已开启「禁止导出拉屎」，不会写入子文件夹的 .tv2-card.json');
   const prefs = snapshotCardPrefs();
   try {
     const data = await api('/api/card-prefs/apply', {
@@ -894,6 +990,7 @@ async function applyCardPrefsToSubfolders() {
 async function applyCardPrefsToAll() {
   const base = state.root || state.folder;
   if (!base) return toast('先打开资料库');
+  if (noSidecars()) return toast('已开启「禁止导出拉屎」，不会写入资料库的 .tv2-card.json');
   const prefs = snapshotCardPrefs();
   try {
     const data = await api('/api/card-prefs/apply', {
@@ -1000,7 +1097,9 @@ function renderCardPrefs() {
       <button class="solid-btn" id="cardPrefsApplySubs" type="button">应用到全部子文件夹</button>
       <button class="text-btn" id="cardPrefsApplyAll" type="button">应用到资料库全部</button>
     </div>
-    <div class="sub" style="margin: 4px 8px 2px;">设置保存在文件夹下的 .tv2-card.json</div>
+    <div class="sub" style="margin: 4px 8px 2px;">${noSidecars()
+      ? '已开启「禁止导出拉屎」：设置只保存在本浏览器，不写 .tv2-card.json'
+      : '设置保存在文件夹下的 .tv2-card.json'}</div>
   `;
   $('thumbSlider').oninput = () => {
     state.thumbTime = Number($('thumbSlider').value);
@@ -1432,9 +1531,108 @@ function playRelative(step) {
   openListItem(next);
 }
 
+function infoRow(label, value) {
+  if (value == null || value === '' || value === '—') return '';
+  return `<div class="info-row"><span>${esc(label)}</span><b title="${esc(String(value))}">${esc(String(value))}</b></div>`;
+}
+function renderInfoBody(info, extra = {}) {
+  const body = $('infoBody');
+  if (!body) return;
+  if (!info) {
+    body.innerHTML = `<div class="sub">${esc(extra.error || '暂无信息')}</div>`;
+    return;
+  }
+  const res = (info.width && info.height) ? `${info.width} × ${info.height}` : '';
+  const bits = [
+    infoRow('名称', info.name),
+    infoRow('路径', info.path),
+    infoRow('类型', info.type === 'image' ? '图片' : (info.type === 'video' ? '视频' : (info.ext || ''))),
+    infoRow('大小', info.size != null ? formatSize(info.size) : ''),
+    infoRow('时长', info.duration ? formatDurationLong(info.duration) : ''),
+    infoRow('分辨率', res),
+    infoRow('帧率', info.fps ? (info.fps + ' fps') : ''),
+    infoRow('总码率', formatBitrate(info.bitrate)),
+    infoRow('容器', info.formatName || info.container),
+    infoRow('视频编码', info.videoCodec || info.videoCodecTag),
+    infoRow('像素格式', info.pixFmt),
+    infoRow('音频编码', info.audioCodec || info.audioCodecTag),
+    infoRow('音频采样', info.sampleRate ? (info.sampleRate + ' Hz') : ''),
+    infoRow('声道', info.channels ? (info.channels + (info.channelLayout ? `（${info.channelLayout}）` : '')) : ''),
+    infoRow('音频码率', formatBitrate(info.audioBitrate)),
+    infoRow('流数量', info.streamCount || ''),
+    infoRow('创建时间', formatInfoTime(info.birthtime)),
+    infoRow('修改时间', formatInfoTime(info.mtime))
+  ].filter(Boolean);
+  body.innerHTML = bits.length
+    ? `<div class="info-grid">${bits.join('')}</div>`
+    : '<div class="sub">没有可显示的元信息</div>';
+}
+async function loadVideoInfo() {
+  const body = $('infoBody');
+  const player = state.player;
+  if (!body) return;
+  if (!player) {
+    renderInfoBody(null, { error: '当前没有打开的视频' });
+    return;
+  }
+  body.innerHTML = '<div class="sub">读取中…</div>';
+  if (player.kind === 'file' && player.path) {
+    try {
+      const info = await api('/api/file-info?' + qs({ path: player.path }));
+      renderInfoBody(info);
+    } catch (err) {
+      // Fallback to list metadata + HTML video element.
+      const file = state.files.find((row) => row.path === player.path);
+      const vid = $('video');
+      renderInfoBody({
+        name: player.name,
+        path: player.path,
+        type: player.type || file?.type || 'video',
+        size: file?.size,
+        birthtime: file?.birthtime,
+        duration: vid?.duration || 0,
+        width: vid?.videoWidth || 0,
+        height: vid?.videoHeight || 0
+      });
+      if (err?.message) toast(err.message);
+    }
+    return;
+  }
+  if (player.kind === 'trick') {
+    const vid = $('video');
+    renderInfoBody({
+      name: player.name,
+      path: player.path || '',
+      type: 'video',
+      size: player.fileSize,
+      duration: vid?.duration || 0,
+      width: vid?.videoWidth || 0,
+      height: vid?.videoHeight || 0
+    });
+    return;
+  }
+  const vid = $('video');
+  renderInfoBody({
+    name: player.name,
+    path: player.path || player.key || '',
+    type: player.type || 'video',
+    duration: vid?.duration || 0,
+    width: vid?.videoWidth || 0,
+    height: vid?.videoHeight || 0
+  });
+}
+async function toggleInfoSection() {
+  const section = $('infoSection');
+  if (!section) return;
+  const show = !section.classList.contains('show');
+  section.classList.toggle('show', show);
+  if (show) await loadVideoInfo();
+}
+
 async function loadSidePanel() {
   const player = state.player;
   if (!player) return;
+  if ($('infoSection')?.classList.contains('show')) loadVideoInfo();
   if (player.kind === 'file') {
     const notes = await api('/api/notes?' + qs({ path: player.path })).catch(() => ({ text: '' }));
     $('notes').value = notes.text || '';
@@ -1821,6 +2019,8 @@ function renderHelp() {
     </div>
     <div class="help-title">设置</div>
     <label class="check"><input type="checkbox" id="skipDelete" ${localStorage.getItem('tv2-skip-delete') === '1' ? 'checked' : ''}> 删除时不再询问</label>
+    <label class="check"><input type="checkbox" id="noSidecars" ${noSidecars() ? 'checked' : ''}> 禁止导出拉屎（不写点开头文件）</label>
+    ${noSidecars() ? sidecarLossHtml() : '<div class="sub" style="padding: 0 8px 6px;">勾选后不在媒体文件夹生成 .tv2-card.json / .TThumb.PNG，并提示会少哪些能力。</div>'}
     <button class="menu-item" id="excludeBtn" type="button">这个文件夹不记播放历史</button>
     <div class="help-title">快捷键</div>
     <div class="help-keys">
@@ -1875,6 +2075,12 @@ function renderHelp() {
     };
   }
   $('skipDelete').onchange = () => localStorage.setItem('tv2-skip-delete', $('skipDelete').checked ? '1' : '0');
+  $('noSidecars').onchange = () => {
+    localStorage.setItem('tv2-no-sidecars', $('noSidecars').checked ? '1' : '0');
+    renderHelp();
+    if ($('cardPrefsPop') && !$('cardPrefsPop').hidden) renderCardPrefs();
+    toast($('noSidecars').checked ? '已禁止向文件夹写入点开头文件' : '已允许写入点开头附属文件');
+  };
   $('excludeBtn').onclick = async () => {
     if (!state.folder) return;
     await api('/api/history-exclude', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: state.folder, action: 'add' }) });
@@ -3613,6 +3819,7 @@ function wire() {
     toast(state.shuffle ? '随机已开（播完一轮才重复）' : '随机已关');
   };
   $('detailDelete').onclick = () => deleteCurrentAndContinue();
+  $('infoBtn').onclick = () => toggleInfoSection();
   $('notesBtn').onclick = () => $('notesSection').classList.toggle('show');
   $('clipsToggleBtn').onclick = () => $('clipsSection').classList.toggle('show');
   $('shotBtn').onclick = screenshot;
@@ -3835,6 +4042,7 @@ function wire() {
     if (state.view !== 'browse' || !state.folder) return;
     const image = [...(event.clipboardData?.files || [])].find((file) => file.type.startsWith('image/'));
     if (!image) return;
+    if (noSidecars()) return toast('已开启「禁止导出拉屎」，不会写入 .TThumb.PNG');
     const body = new FormData();
     body.append('thumb', image);
     body.append('folderPath', state.folder);
