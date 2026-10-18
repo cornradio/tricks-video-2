@@ -20,6 +20,7 @@ const state = {
   blobUrl: '',
   markA: null,
   markB: null,
+  loopClipId: null,
   repeat: localStorage.getItem('tv2-repeat') === 'one' ? 'one' : 'all',
   shuffle: localStorage.getItem('tv2-shuffle') === '1',
   shuffleBack: [],
@@ -45,6 +46,7 @@ const state = {
 
 const ACCENTS = [
   ['ember', '橘黄', '#e08a55'],
+  ['classic', '经典橘', '#d4471f'],
   ['hub', 'Pornhub', '#ff9000'],
   ['youtube', 'YouTube', '#ff0000'],
   ['google', 'Google', '#4285f4'],
@@ -72,6 +74,73 @@ function clock(seconds) {
   if (seconds == null || !Number.isFinite(Number(seconds))) return '—';
   const whole = Math.max(0, Math.floor(Number(seconds)));
   return Math.floor(whole / 60) + ':' + String(whole % 60).padStart(2, '0');
+}
+/** Accepts 2:08 / 1:02:08 / 128 / 2.5 — returns seconds or null. */
+function parseClock(text) {
+  const raw = String(text || '').trim().replace(/，/g, '.').replace(/：/g, ':');
+  if (!raw || raw === '—' || raw === '-') return null;
+  if (/^\d+(\.\d+)?$/.test(raw)) {
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  }
+  const parts = raw.split(':');
+  if (parts.length < 2 || parts.length > 3) return null;
+  const nums = parts.map((part) => Number(part));
+  if (nums.some((n) => !Number.isFinite(n) || n < 0)) return null;
+  if (parts.length === 2) return nums[0] * 60 + nums[1];
+  return nums[0] * 3600 + nums[1] * 60 + nums[2];
+}
+function setMarkDisplay(which, seconds) {
+  const el = $(which === 'a' ? 'markAVal' : 'markBVal');
+  if (!el) return;
+  el.value = seconds == null || !Number.isFinite(Number(seconds)) ? '' : clock(seconds);
+}
+function commitMarkInput(which) {
+  const el = $(which === 'a' ? 'markAVal' : 'markBVal');
+  if (!el) return null;
+  const parsed = parseClock(el.value);
+  if (parsed == null) {
+    if (!String(el.value || '').trim()) {
+      if (which === 'a') state.markA = null;
+      else state.markB = null;
+      el.value = '';
+      return null;
+    }
+    toast('时间格式用 2:08 或秒数');
+    setMarkDisplay(which, which === 'a' ? state.markA : state.markB);
+    return which === 'a' ? state.markA : state.markB;
+  }
+  const video = $('video');
+  const dur = Number(video?.duration);
+  const capped = Number.isFinite(dur) && dur > 0 ? Math.min(parsed, dur) : parsed;
+  if (which === 'a') state.markA = capped;
+  else state.markB = capped;
+  setMarkDisplay(which, capped);
+  return capped;
+}
+function clearClipLoop() {
+  if (!state.loopClipId) return;
+  state.loopClipId = null;
+  renderClips();
+}
+function activeLoopClip() {
+  if (!state.loopClipId) return null;
+  return state.clips.find((clip) => clip.id === state.loopClipId) || null;
+}
+function toggleClipLoop(clip) {
+  if (!clip) return;
+  if (state.loopClipId === clip.id) {
+    state.loopClipId = null;
+    renderClips();
+    toast('已取消片段循环');
+    return;
+  }
+  state.loopClipId = clip.id;
+  renderClips();
+  const video = $('video');
+  try { video.currentTime = Number(clip.startTime) || 0; } catch { /* ok */ }
+  video.play().catch(() => {});
+  toast('片段循环中 · 再点取消');
 }
 function formatDurationLong(seconds) {
   if (seconds == null || !Number.isFinite(Number(seconds)) || Number(seconds) <= 0) return '—';
@@ -222,6 +291,11 @@ function releaseVideo() {
   video.load();
   state.cues = [];
   state.subs = [];
+  state.loopClipId = null;
+  state.markA = null;
+  state.markB = null;
+  setMarkDisplay('a', null);
+  setMarkDisplay('b', null);
   if ($('subOverlay')) $('subOverlay').textContent = '';
   if ($('subSelect')) $('subSelect').hidden = true;
   $('still').hidden = true;
@@ -274,8 +348,9 @@ function closePlayer() {
   state.player = null;
   state.markA = null;
   state.markB = null;
-  $('markAVal').textContent = '—';
-  $('markBVal').textContent = '—';
+  state.loopClipId = null;
+  setMarkDisplay('a', null);
+  setMarkDisplay('b', null);
   document.querySelectorAll('[data-view-panel]').forEach((panel) => {
     panel.hidden = panel.dataset.viewPanel !== state.view;
   });
@@ -1648,15 +1723,18 @@ async function loadSidePanel() {
 }
 
 function renderClips() {
+  if (state.loopClipId && !state.clips.some((clip) => clip.id === state.loopClipId)) {
+    state.loopClipId = null;
+  }
   $('clipList').innerHTML = state.clips.map((clip) => `
-    <div class="clip-item">
-      <button class="text-btn" type="button" data-jump="${clip.id}">${esc(clip.name)} · ${clock(clip.startTime)}-${clock(clip.endTime)}</button>
+    <div class="clip-item${state.loopClipId === clip.id ? ' on' : ''}">
+      <button class="text-btn" type="button" data-jump="${clip.id}" title="点击循环此片段，再点取消">${esc(clip.name)} · ${clock(clip.startTime)}-${clock(clip.endTime)}</button>
       <span>
         ${state.player?.kind === 'local' ? '' : `<a href="${state.player.kind === 'trick' ? `/api/tricks/${state.player.id}/clips/${clip.id}/export` : `/api/clips/${clip.id}/export`}">导出</a>`}
         <button class="text-btn" type="button" data-delclip="${clip.id}">删除</button>
       </span>
     </div>
-  `).join('') || '<div class="sub">用 A / B 标一段，再保存。</div>';
+  `).join('') || '<div class="sub">用 A / B 标一段，再保存。也可直接改 A/B 时间。</div>';
 }
 
 async function saveNotes() {
@@ -1677,9 +1755,12 @@ async function saveNotes() {
 }
 
 async function saveClip() {
-  if (state.markA == null || state.markB == null) return toast('先标起点和终点');
+  commitMarkInput('a');
+  commitMarkInput('b');
+  if (state.markA == null || state.markB == null) return toast('先标起点和终点，或手动输入时间');
   const startTime = Math.min(state.markA, state.markB);
   const endTime = Math.max(state.markA, state.markB);
+  if (endTime - startTime < 0.05) return toast('终点要晚于起点');
   const name = await askText('片段名称', '片段 ' + (state.clips.length + 1));
   if (!name) return;
   const player = state.player;
@@ -3923,17 +4004,40 @@ function wire() {
     }
   };
   $('streamPinned').onclick = () => openStreamPlayer(localStorage.getItem('tv2-pinned-player'));
-  $('markA').onclick = () => { state.markA = $('video').currentTime || 0; $('markAVal').textContent = clock(state.markA); };
-  $('markB').onclick = () => { state.markB = $('video').currentTime || 0; $('markBVal').textContent = clock(state.markB); };
+  $('markA').onclick = () => {
+    state.markA = $('video').currentTime || 0;
+    setMarkDisplay('a', state.markA);
+  };
+  $('markB').onclick = () => {
+    state.markB = $('video').currentTime || 0;
+    setMarkDisplay('b', state.markB);
+  };
+  const bindMarkInput = (which) => {
+    const el = $(which === 'a' ? 'markAVal' : 'markBVal');
+    if (!el) return;
+    el.addEventListener('change', () => commitMarkInput(which));
+    el.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        commitMarkInput(which);
+        el.blur();
+      }
+    });
+  };
+  bindMarkInput('a');
+  bindMarkInput('b');
   $('saveClip').onclick = () => saveClip();
   $('clipList').onclick = async (event) => {
+    if (event.target.closest('a')) return;
     const jump = event.target.closest('[data-jump]');
     if (jump) {
       const clip = state.clips.find((item) => item.id === jump.dataset.jump);
-      if (clip) { $('video').currentTime = clip.startTime; $('video').play().catch(() => {}); }
+      if (clip) toggleClipLoop(clip);
+      return;
     }
     const del = event.target.closest('[data-delclip]');
     if (del && state.player) {
+      if (state.loopClipId === del.dataset.delclip) state.loopClipId = null;
       if (state.player.kind === 'file') await api('/api/clips/' + del.dataset.delclip, { method: 'DELETE' });
       else if (state.player.kind === 'trick') await api(`/api/tricks/${state.player.id}/clips/${del.dataset.delclip}`, { method: 'DELETE' });
       else {
@@ -3950,6 +4054,15 @@ function wire() {
     const video = $('video');
     $('playTimeLabel').textContent = clock(video.currentTime) + ' / ' + clock(video.duration);
     showCue(video.currentTime || 0);
+    const loop = activeLoopClip();
+    if (loop) {
+      const end = Number(loop.endTime);
+      const start = Number(loop.startTime) || 0;
+      if (Number.isFinite(end) && end > start && video.currentTime >= end - 0.04) {
+        try { video.currentTime = start; } catch { /* ok */ }
+        if (video.paused) video.play().catch(() => {});
+      }
+    }
     const player = state.player;
     if (!player || player.kind === 'local') return;
     const id = player.kind === 'trick' ? player.id : player.path;
@@ -3959,6 +4072,12 @@ function wire() {
     rememberHistory(id, player.name, video.currentTime);
   };
   $('video').onended = () => {
+    const loop = activeLoopClip();
+    if (loop) {
+      try { $('video').currentTime = Number(loop.startTime) || 0; } catch { /* ok */ }
+      $('video').play().catch(() => {});
+      return;
+    }
     if (state.repeat === 'one') { $('video').currentTime = 0; $('video').play().catch(() => {}); }
     else if (state.repeat === 'all') playRelative(1);
   };

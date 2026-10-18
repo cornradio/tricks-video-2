@@ -21,7 +21,7 @@ try {
   var accent = localStorage.getItem('tv2-accent');
   var lightThemes = { paper: 1, blossom: 1, moss: 1, linen: 1, snow: 1 };
   var accentOf = { hearth: 'ember', paper: 'ember' };
-  var known = { ember: 1, hub: 1, youtube: 1, google: 1, twitter: 1, microsoft: 1 };
+  var known = { ember: 1, classic: 1, hub: 1, youtube: 1, google: 1, twitter: 1, microsoft: 1 };
   if (!mode) mode = lightThemes[oldTheme] ? 'light' : 'dark';
   if (!accent) accent = accentOf[oldTheme] || 'ember';
   if (!known[accent]) accent = 'ember';
@@ -312,9 +312,9 @@ try {
           <span>片段标记</span>
           <div class="clip-row">
             <button class="ctrl-btn" id="markA" type="button" title="起点">A</button>
-            <span id="markAVal">—</span>
+            <input class="clip-time" id="markAVal" type="text" inputmode="decimal" placeholder="0:00" title="可手动输入，如 2:08" aria-label="起点时间">
             <button class="ctrl-btn" id="markB" type="button" title="终点">B</button>
-            <span id="markBVal">—</span>
+            <input class="clip-time" id="markBVal" type="text" inputmode="decimal" placeholder="0:00" title="可手动输入，如 2:08" aria-label="终点时间">
             <button class="solid-btn" id="saveClip" type="button">保存片段</button>
           </div>
         </div>
