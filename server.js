@@ -39,6 +39,7 @@ const FILES = {
 };
 
 const VIDEO_EXTS = new Set(['.mp4', '.webm', '.mov', '.avi', '.mkv', '.wmv', '.flv', '.m4v', '.ts', '.m2ts']);
+const AUDIO_EXTS = new Set(['.mp3', '.m4a', '.aac', '.flac', '.wav', '.ogg', '.opus', '.wma']);
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif', '.avif', '.svg']);
 const SUB_EXTS = new Set(['.srt', '.ass', '.ssa', '.vtt']);
 const REMUX_EXTS = new Set(['.mkv', '.avi', '.wmv', '.flv', '.ts', '.m2ts']);
@@ -111,13 +112,22 @@ function contentType(filePath) {
     '.flv': 'video/x-flv', '.ts': 'video/mp2t', '.m2ts': 'video/mp2t',
     '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp',
     '.gif': 'image/gif', '.bmp': 'image/bmp', '.avif': 'image/avif', '.svg': 'image/svg+xml',
+    '.mp3': 'audio/mpeg', '.m4a': 'audio/mp4', '.aac': 'audio/aac', '.flac': 'audio/flac',
+    '.wav': 'audio/wav', '.ogg': 'audio/ogg', '.opus': 'audio/ogg', '.wma': 'audio/x-ms-wma',
     '.vtt': 'text/vtt', '.srt': 'text/plain', '.ass': 'text/x-ssa', '.ssa': 'text/x-ssa'
   };
   return map[ext] || 'application/octet-stream';
 }
 function isMedia(name) {
   const ext = path.extname(name).toLowerCase();
-  return VIDEO_EXTS.has(ext) || IMAGE_EXTS.has(ext);
+  return VIDEO_EXTS.has(ext) || AUDIO_EXTS.has(ext) || IMAGE_EXTS.has(ext);
+}
+function mediaKind(name) {
+  const ext = path.extname(name).toLowerCase();
+  if (IMAGE_EXTS.has(ext)) return 'image';
+  if (AUDIO_EXTS.has(ext)) return 'audio';
+  if (VIDEO_EXTS.has(ext)) return 'video';
+  return 'file';
 }
 function notePath(filePath) {
   return filePath + '.notes.txt';
@@ -336,7 +346,7 @@ async function describeMedia(dirPath, name, names, subs) {
     path: full,
     size,
     birthtime,
-    type: IMAGE_EXTS.has(ext) ? 'image' : 'video',
+    type: mediaKind(name),
     hasNote: names.has(noteName),
     note,
     subtitles: subs
@@ -456,6 +466,29 @@ async function ensureThumb(filePath, seconds) {
     ], [filePath], 12000);
     if (fs.existsSync(dest) && fs.statSync(dest).size > 500) return dest;
     throw new Error('thumbnail empty');
+  } finally {
+    freeThumbSlot();
+  }
+}
+async function ensureAudioCover(filePath) {
+  const dest = path.join(THUMBS, md5(filePath + '@cover') + '.jpg');
+  if (fs.existsSync(dest) && fs.statSync(dest).size > 200) return dest;
+  await takeThumbSlot();
+  try {
+    if (fs.existsSync(dest) && fs.statSync(dest).size > 200) return dest;
+    // Prefer embedded album art / attached picture stream.
+    try {
+      await runCommand('ffmpeg', [
+        '-y', '-hide_banner', '-loglevel', 'error',
+        '-i', filePath, '-an', '-vcodec', 'mjpeg', '-frames:v', '1',
+        '-vf', 'scale=640:-1', dest
+      ], [filePath], 8000);
+    } catch {
+      try { fs.unlinkSync(dest); } catch { /* retry */ }
+      throw new Error('no cover');
+    }
+    if (fs.existsSync(dest) && fs.statSync(dest).size > 200) return dest;
+    throw new Error('cover empty');
   } finally {
     freeThumbSlot();
   }
@@ -594,7 +627,7 @@ app.get('/api/play', async (req, res) => {
   if (!filePath) return;
   try {
     const playable = await ensurePlayable(filePath);
-    await sendBytes(playable, req, res, 'video/mp4');
+    await sendBytes(playable, req, res, contentType(playable));
   } catch (err) {
     if (!res.headersSent) res.status(500).json({ error: '无法播放: ' + err.message });
     else res.destroy();
@@ -634,6 +667,17 @@ app.get('/api/thumbnail', async (req, res) => {
       res.set('Content-Type', contentType(filePath));
       res.set('Cache-Control', 'no-store');
       return res.end(buf);
+    }
+    if (AUDIO_EXTS.has(ext)) {
+      try {
+        const cover = await ensureAudioCover(filePath);
+        const buf = await lease.readWhole(cover, 20 * 1024 * 1024);
+        res.set('Content-Type', 'image/jpeg');
+        res.set('Cache-Control', req.query.fresh ? 'no-store' : 'public, max-age=86400');
+        return res.end(buf);
+      } catch {
+        return res.status(404).send('audio has no cover');
+      }
     }
     if (req.query.fresh) {
       const stamp = req.query.t == null ? '1' : String(req.query.t);
@@ -1197,9 +1241,9 @@ app.get('/api/file-info', async (req, res) => {
     mtime: stat.mtimeMs,
     birthtime: stat.birthtimeMs || stat.mtimeMs,
     ext,
-    type: IMAGE_EXTS.has(ext) ? 'image' : (VIDEO_EXTS.has(ext) ? 'video' : 'file')
+    type: mediaKind(path.basename(filePath))
   };
-  if (VIDEO_EXTS.has(ext) || IMAGE_EXTS.has(ext)) {
+  if (VIDEO_EXTS.has(ext) || AUDIO_EXTS.has(ext) || IMAGE_EXTS.has(ext)) {
     try {
       const probed = await runCommand('ffprobe', [
         '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', filePath

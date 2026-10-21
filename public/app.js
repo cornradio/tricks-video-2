@@ -41,7 +41,10 @@ const state = {
   listSeq: 0,
   cues: [],
   subs: [],
-  cardPrefs: null
+  cardPrefs: null,
+  audioTrack: null,
+  audioBlobUrl: '',
+  audioLoop: localStorage.getItem('tv2-audio-loop') === '1'
 };
 
 const ACCENTS = [
@@ -188,10 +191,21 @@ function sidecarLossHtml() {
   `;
 }
 function isMediaName(name) {
-  return /\.(mp4|webm|mov|avi|mkv|wmv|flv|m4v|ts|m2ts|jpg|jpeg|png|webp|gif|bmp|avif)$/i.test(name);
+  return /\.(mp4|webm|mov|avi|mkv|wmv|flv|m4v|ts|m2ts|mp3|m4a|aac|flac|wav|ogg|opus|wma|jpg|jpeg|png|webp|gif|bmp|avif)$/i.test(name);
 }
 function mediaType(name) {
-  return /\.(jpg|jpeg|png|webp|gif|bmp|avif)$/i.test(name) ? 'image' : 'video';
+  if (/\.(jpg|jpeg|png|webp|gif|bmp|avif)$/i.test(name)) return 'image';
+  if (/\.(mp3|m4a|aac|flac|wav|ogg|opus|wma)$/i.test(name)) return 'audio';
+  if (/\.(mp4|webm|mov|avi|mkv|wmv|flv|m4v|ts|m2ts)$/i.test(name)) return 'video';
+  return 'file';
+}
+/** Prefer extension so JPG never sneaks into the audio filter. */
+function fileKind(file) {
+  if (!file) return '';
+  const byName = mediaType(file.name || '');
+  if (byName === 'image' || byName === 'audio' || byName === 'video') return byName;
+  if (file.type === 'image' || file.type === 'audio' || file.type === 'video') return file.type;
+  return byName || '';
 }
 function toast(message) {
   const el = $('toast');
@@ -209,6 +223,60 @@ async function api(url, options) {
   }
   if (!response.ok) throw new Error((data && data.error) || response.statusText);
   return data;
+}
+function showUploadDock(title = '正在上传') {
+  const dock = $('dock');
+  if (!dock) return;
+  dock.hidden = false;
+  dock.innerHTML = `
+    <div class="dock-head"><strong id="dockTitle">${esc(title)}</strong><span id="dockPct">0%</span></div>
+    <div class="bar"><span id="dockBar"></span></div>
+    <div id="dockText" class="sub">准备中…</div>
+    <div class="dock-actions">
+      <button class="text-btn" id="dockClose" type="button">隐藏</button>
+    </div>`;
+  $('dockClose').onclick = () => { dock.hidden = true; };
+}
+function setUploadProgress(pct, text) {
+  if ($('dockBar')) $('dockBar').style.width = Math.max(0, Math.min(100, pct)) + '%';
+  if ($('dockPct')) $('dockPct').textContent = Math.round(pct) + '%';
+  if ($('dockText') && text) $('dockText').textContent = text;
+}
+function uploadFiles(folder, fileList) {
+  const files = [...(fileList || [])].filter((file) => file && file.name);
+  if (!folder) return Promise.reject(new Error('先打开一个文件夹'));
+  if (!files.length) return Promise.reject(new Error('没有可上传的文件'));
+  showUploadDock('正在上传');
+  setUploadProgress(0, `0 / ${files.length} · 准备发送`);
+  const body = new FormData();
+  body.append('folderPath', folder);
+  files.forEach((file) => body.append('files', file, file.name));
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/upload');
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable) return;
+      const pct = (event.loaded / event.total) * 100;
+      setUploadProgress(pct, `${formatSize(event.loaded)} / ${formatSize(event.total)} · ${files.length} 个文件`);
+    };
+    xhr.onload = () => {
+      let data = null;
+      try { data = JSON.parse(xhr.responseText || '{}'); } catch { data = { error: xhr.responseText?.slice(0, 180) }; }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        setUploadProgress(100, '上传完成');
+        if ($('dockTitle')) $('dockTitle').textContent = '上传完成';
+        resolve(data);
+      } else {
+        if ($('dockTitle')) $('dockTitle').textContent = '上传失败';
+        reject(new Error((data && data.error) || xhr.statusText || '上传失败'));
+      }
+    };
+    xhr.onerror = () => {
+      if ($('dockTitle')) $('dockTitle').textContent = '上传失败';
+      reject(new Error('网络错误，上传失败'));
+    };
+    xhr.send(body);
+  });
 }
 function qs(params) {
   const search = new URLSearchParams();
@@ -433,7 +501,8 @@ function visibleFiles(files) {
   const words = state.query.trim().toLowerCase().split(/\s+/).filter(Boolean);
   const rank = new Map(state.history.map((row, index) => [row.trickId, index]));
   const list = files.filter((file) => {
-    if (state.filter !== 'all' && file.type !== state.filter) return false;
+    const kind = fileKind(file);
+    if (state.filter !== 'all' && kind !== state.filter) return false;
     return matchesQuery([file.name, file.note, file.notes], words);
   });
   if (state.sort === 'shuffle') {
@@ -763,11 +832,35 @@ function fillCard(card, file) {
   const bits = [esc(formatSize(file.size)), where ? esc(where) : ''].filter(Boolean);
   const note = noteMarkHtml(file);
   const sub = [bits.join(' · '), note].filter(Boolean).join(bits.length && note ? ' · ' : '');
+  const kind = fileKind(file);
+  const playing = !!(state.audioTrack && (
+    (state.audioTrack.path && file.path && state.audioTrack.path === file.path)
+    || (state.audioTrack.key && file.key && state.audioTrack.key === file.key)
+  ));
+  card.classList.toggle('now-playing', playing);
+  const thumbSrc = file.path
+    ? `/api/thumbnail?${qs({ path: file.path, t: kind === 'audio' ? 'cover' : state.thumbTime, _: state.coverStamp })}`
+    : '';
+  let thumb;
+  if (kind === 'audio' && !thumbSrc) thumb = '<div class="audio-thumb" aria-hidden="true">♪</div>';
+  else if (thumbSrc) thumb = `<img alt="" loading="lazy" src="${esc(thumbSrc)}">`;
+  else thumb = '<div class="thumb-fallback" aria-hidden="true"></div>';
   card.innerHTML = `
-    <div class="thumb"><img alt="" loading="lazy" src="/api/thumbnail?${qs({ path: file.path, t: state.thumbTime, _: state.coverStamp })}"><span class="badge">${esc(file.name.split('.').pop().toUpperCase())}</span></div>
+    <div class="thumb">${thumb}<span class="badge">${esc(file.name.split('.').pop().toUpperCase())}</span></div>
     <div class="meta"><div class="name">${esc(file.name)}</div><div class="sub">${sub}</div>${folderTags(file.path).length ? `<div class="card-tags">${tagButtons(folderTags(file.path))}</div>` : ''}</div>`;
   const img = card.querySelector('img');
-  if (img) img.onerror = () => img.remove();
+  if (img) {
+    img.onerror = () => {
+      const fallback = document.createElement('div');
+      if (kind === 'audio') {
+        fallback.className = 'audio-thumb';
+        fallback.textContent = '♪';
+      } else {
+        fallback.className = 'thumb-fallback';
+      }
+      img.replaceWith(fallback);
+    };
+  }
 }
 function renderGrid() {
   if (previewOpen()) closePreviewNow();
@@ -838,7 +931,10 @@ async function selectFolder(dir, opts = {}) {
     loadFolderHistory(dir)
   ]);
   if (seq !== state.listSeq) return;
-  state.files = data.files || [];
+  state.files = (data.files || []).map((file) => {
+    const kind = fileKind(file);
+    return kind && file.type !== kind ? { ...file, type: kind } : file;
+  });
   state.folderInfo = { name: data.name || state.folderInfo.name, path: dir, hasThumb: !!data.hasThumb };
   state.thumbTime = Number(prefs.thumbTime ?? 1);
   applyCardPrefs(prefs);
@@ -869,6 +965,12 @@ function cuePlayback(video, time) {
 }
 async function openFile(file, time) {
   if (!file) return;
+  if (fileKind(file) === 'audio') {
+    await openAudio(file, time);
+    return;
+  }
+  const mini = $('miniAudio');
+  if (mini && !mini.paused) { mini.pause(); syncMiniPlayButton(); }
   releaseVideo();
   state.player = { kind: 'file', ...file };
   showPlayerPage();
@@ -888,6 +990,191 @@ async function openFile(file, time) {
   }
   await loadSidePanel();
   rememberHistory(file.path, file.name, Number(time) || 0);
+}
+
+function audioList() {
+  if (state.view === 'local') {
+    return (state.local.files || []).filter((item) => fileKind(item) === 'audio');
+  }
+  const list = (state.playlist && state.playlist.length ? state.playlist : visibleFiles(state.files || []))
+    .filter((item) => fileKind(item) === 'audio');
+  if (list.length) return list;
+  return (state.files || []).filter((item) => fileKind(item) === 'audio');
+}
+function syncMiniPlayButton() {
+  const box = $('miniPlayer');
+  const audio = $('miniAudio');
+  if (!box || !audio) return;
+  box.classList.toggle('is-playing', !audio.paused && !audio.ended);
+}
+function syncMiniProgress() {
+  const audio = $('miniAudio');
+  if (!audio) return;
+  const cur = audio.currentTime || 0;
+  const dur = Number.isFinite(audio.duration) ? audio.duration : 0;
+  if ($('miniTime')) $('miniTime').textContent = clock(cur) + ' / ' + (dur ? clock(dur) : '—');
+  if ($('miniFill')) $('miniFill').style.width = dur ? ((cur / dur) * 100) + '%' : '0%';
+}
+function renderMiniCover(track) {
+  const cover = $('miniCover');
+  if (!cover) return;
+  const src = track?.path
+    ? `/api/thumbnail?${qs({ path: track.path, t: 'cover', _: state.coverStamp })}`
+    : '';
+  if (!src) {
+    cover.innerHTML = '<span aria-hidden="true">♪</span>';
+    return;
+  }
+  cover.innerHTML = `<img alt="" src="${esc(src)}">`;
+  const img = cover.querySelector('img');
+  if (img) {
+    img.onerror = () => { cover.innerHTML = '<span aria-hidden="true">♪</span>'; };
+  }
+}
+function syncMiniPlayer() {
+  const box = $('miniPlayer');
+  const track = state.audioTrack;
+  if (!box) return;
+  if (!track) {
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  if ($('miniTitle')) $('miniTitle').textContent = track.name || '音频';
+  if ($('miniSub')) {
+    const folder = track.path ? dirname(track.path).split(/[/\\]/).pop() : (track.parent || '');
+    $('miniSub').textContent = folder || '';
+  }
+  renderMiniCover(track);
+  syncMiniPlayButton();
+  syncMiniProgress();
+  syncMiniLoopButton();
+  document.querySelectorAll('.card[data-file], .card[data-local-file]').forEach((card) => {
+    const match = !!(
+      (track.path && card.dataset.file && card.dataset.file === track.path)
+      || (track.key && card.dataset.localFile && card.dataset.localFile === track.key)
+    );
+    card.classList.toggle('now-playing', match);
+  });
+}
+async function openAudioDetail() {
+  const track = state.audioTrack;
+  if (!track) return;
+  const audio = $('miniAudio');
+  const time = audio && Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+  if (audio && !audio.paused) audio.pause();
+  syncMiniPlayButton();
+  if (track.kind === 'local' || track.handle) {
+    // Detail page needs its own blob URL; keep mini blob for resume if user comes back.
+    releaseVideo();
+    const blob = await track.handle.getFile();
+    state.blobUrl = URL.createObjectURL(blob);
+    state.player = { kind: 'local', ...track };
+    showPlayerPage();
+    updateChrome();
+    const video = $('video');
+    video.hidden = false;
+    $('still').hidden = true;
+    video.src = state.blobUrl;
+    cuePlayback(video, time);
+    await loadSidePanel();
+    return;
+  }
+  // Open detail without routing back into mini player.
+  releaseVideo();
+  state.player = { kind: 'file', ...track };
+  showPlayerPage();
+  syncPinned();
+  updateChrome();
+  const video = $('video');
+  video.hidden = false;
+  $('still').hidden = true;
+  video.src = '/api/play?' + qs({ path: track.path });
+  cuePlayback(video, time);
+  loadSubtitles(track.subtitles || []);
+  await loadSidePanel();
+  rememberHistory(track.path, track.name, time);
+}
+function clearAudioBlob() {
+  if (state.audioBlobUrl) {
+    URL.revokeObjectURL(state.audioBlobUrl);
+    state.audioBlobUrl = '';
+  }
+}
+function closeMiniPlayer() {
+  const audio = $('miniAudio');
+  if (audio) {
+    audio.pause();
+    audio.removeAttribute('src');
+    try { audio.load(); } catch { /* ok */ }
+  }
+  clearAudioBlob();
+  state.audioTrack = null;
+  syncMiniPlayer();
+}
+async function openAudio(file, time) {
+  if (!file) return;
+  const main = $('video');
+  if (main && !main.paused) main.pause();
+  hideHover();
+  clearAudioBlob();
+  const audio = $('miniAudio');
+  if (!audio) return;
+  let src = '';
+  if (file.kind === 'local' || file.handle) {
+    const blob = await file.handle.getFile();
+    state.audioBlobUrl = URL.createObjectURL(blob);
+    src = state.audioBlobUrl;
+    state.audioTrack = { kind: 'local', ...file };
+  } else {
+    src = '/api/play?' + qs({ path: file.path });
+    state.audioTrack = { kind: 'file', ...file };
+  }
+  audio.loop = !!state.audioLoop;
+  audio.src = src;
+  const at = Number(time) || 0;
+  const start = () => {
+    if (at > 0.05) {
+      try { audio.currentTime = at; } catch { /* ok */ }
+    }
+    audio.play().catch(() => {});
+    syncMiniPlayButton();
+  };
+  if (audio.readyState >= 1) start();
+  else audio.addEventListener('loadedmetadata', start, { once: true });
+  syncMiniPlayer();
+  if (file.path) rememberHistory(file.path, file.name, Number(time) || 0);
+}
+function syncMiniLoopButton() {
+  const btn = $('miniLoop');
+  if (!btn) return;
+  btn.classList.toggle('on', !!state.audioLoop);
+  btn.title = state.audioLoop ? '单曲循环：开' : '单曲循环：关';
+  btn.setAttribute('aria-pressed', state.audioLoop ? 'true' : 'false');
+  const audio = $('miniAudio');
+  if (audio) audio.loop = !!state.audioLoop;
+}
+function toggleMiniLoop() {
+  state.audioLoop = !state.audioLoop;
+  localStorage.setItem('tv2-audio-loop', state.audioLoop ? '1' : '0');
+  syncMiniLoopButton();
+  toast(state.audioLoop ? '单曲循环已开' : '单曲循环已关');
+}
+function toggleMiniPlay() {
+  const audio = $('miniAudio');
+  if (!audio || !state.audioTrack) return;
+  if (audio.paused) audio.play().catch(() => {});
+  else audio.pause();
+  syncMiniPlayButton();
+}
+function playAudioRelative(step) {
+  const list = audioList();
+  const track = state.audioTrack;
+  if (!track || !list.length) return;
+  const key = track.path || track.key;
+  const index = list.findIndex((item) => (item.path || item.key) === key);
+  const next = list[(index + step + list.length) % list.length];
+  if (next) openAudio(next).catch((err) => toast(err.message));
 }
 
 function vttSeconds(stamp) {
@@ -1424,7 +1711,7 @@ function fileExt(name) {
 function hoverMedia(card) {
   if (card.dataset.file) {
     const file = fileByPath(card.dataset.file);
-    if (!file || file.type === 'image') return null;
+    if (!file || fileKind(file) === 'image' || fileKind(file) === 'audio') return null;
     if (fileExt(file.name) === 'mkv') return { blocked: 'mkv', name: file.name };
     return { src: '/api/play?' + qs({ path: file.path }), path: file.path, name: file.name };
   }
@@ -1621,7 +1908,7 @@ function renderInfoBody(info, extra = {}) {
   const bits = [
     infoRow('名称', info.name),
     infoRow('路径', info.path),
-    infoRow('类型', info.type === 'image' ? '图片' : (info.type === 'video' ? '视频' : (info.ext || ''))),
+    infoRow('类型', info.type === 'image' ? '图片' : (info.type === 'audio' ? '音频' : (info.type === 'video' ? '视频' : (info.ext || '')))),
     infoRow('大小', info.size != null ? formatSize(info.size) : ''),
     infoRow('时长', info.duration ? formatDurationLong(info.duration) : ''),
     infoRow('分辨率', res),
@@ -2524,7 +2811,7 @@ async function renderLocalGrid() {
   });
   files.sort((a, b) => a.name.localeCompare(b.name, 'zh'));
   const words = state.query.trim().toLowerCase().split(/\s+/).filter(Boolean);
-  state.local.files = files.filter((file) => (state.filter === 'all' || file.type === state.filter) && matchesQuery([file.name, file.note], words));
+  state.local.files = files.filter((file) => (state.filter === 'all' || fileKind(file) === state.filter) && matchesQuery([file.name, file.note], words));
   $('localCrumbs').textContent = state.local.folder;
   $('localGrid').innerHTML = state.local.files.map((file) => {
     const where = file.parent !== state.local.folder ? file.parent.split('/').pop() : '';
@@ -2535,6 +2822,10 @@ async function renderLocalGrid() {
   }).join('') || '<div class="empty">这里没有媒体文件。</div>';
 }
 async function openLocalFile(file, time) {
+  if (fileKind(file) === 'audio') {
+    await openAudio({ kind: 'local', ...file, type: 'audio' }, time);
+    return;
+  }
   releaseVideo();
   const blob = await file.handle.getFile();
   state.blobUrl = URL.createObjectURL(blob);
@@ -3361,7 +3652,7 @@ function leaveDouyin(opts = {}) {
   if (item) openListItem(item, time);
 }
 function enterDouyin() {
-  const list = currentList().filter((item) => item.type !== 'image');
+  const list = currentList().filter((item) => item.type === 'video');
   if (!list.length) return toast('当前没有可播放的视频');
   const key = state.player ? (state.player.kind === 'trick' ? state.player.id : state.player.path || state.player.key) : '';
   let start = list.findIndex((item) => (item.id || item.path || item.key) === key);
@@ -3707,6 +3998,9 @@ function wire() {
     const row = event.target.closest('[data-drop], [data-local-drop]');
     if (!row) return;
     event.preventDefault();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = event.dataTransfer.types?.includes('Files') ? 'copy' : 'move';
+    }
     document.querySelectorAll('.tree-row.drop').forEach((item) => item.classList.remove('drop'));
     row.classList.add('drop');
   });
@@ -3719,6 +4013,16 @@ function wire() {
     document.querySelectorAll('.tree-row.drop').forEach((item) => item.classList.remove('drop'));
     if (!folder) return;
     event.preventDefault();
+    const osFiles = [...(event.dataTransfer?.files || [])];
+    if (osFiles.length) {
+      uploadFiles(folder.dataset.drop, osFiles)
+        .then(async () => {
+          await refreshBrowse();
+          toast('上传好了');
+        })
+        .catch((err) => toast(err.message));
+      return;
+    }
     onDropFolder(folder.dataset.drop, dragPayload(event)).catch((err) => toast(err.message));
   });
   $('sortSeg').onclick = (event) => {
@@ -3834,16 +4138,49 @@ function wire() {
   $('uploadBtn').onclick = () => $('uploadInput').click();
   $('uploadInput').onchange = async () => {
     if (!state.folder || !$('uploadInput').files.length) return;
-    const body = new FormData();
-    body.append('folderPath', state.folder);
-    [...$('uploadInput').files].forEach((file) => body.append('files', file));
+    const files = [...$('uploadInput').files];
+    $('uploadInput').value = '';
     try {
-      await api('/api/upload', { method: 'POST', body });
-      $('uploadInput').value = '';
+      await uploadFiles(state.folder, files);
       await refreshBrowse();
       toast('上传好了');
     } catch (err) { toast(err.message); }
   };
+  const miniAudio = $('miniAudio');
+  if (miniAudio) {
+    miniAudio.addEventListener('timeupdate', syncMiniProgress);
+    miniAudio.addEventListener('play', syncMiniPlayButton);
+    miniAudio.addEventListener('pause', syncMiniPlayButton);
+    miniAudio.addEventListener('ended', () => {
+      if (state.audioLoop) {
+        try { miniAudio.currentTime = 0; } catch { /* ok */ }
+        miniAudio.play().catch(() => {});
+        syncMiniPlayButton();
+        return;
+      }
+      const list = audioList();
+      if (list.length > 1) playAudioRelative(1);
+      else syncMiniPlayButton();
+    });
+  }
+  $('miniPlay')?.addEventListener('click', () => toggleMiniPlay());
+  $('miniPrev')?.addEventListener('click', () => playAudioRelative(-1));
+  $('miniNext')?.addEventListener('click', () => playAudioRelative(1));
+  $('miniLoop')?.addEventListener('click', () => toggleMiniLoop());
+  $('miniOpen')?.addEventListener('click', () => {
+    openAudioDetail().catch((err) => toast(err.message));
+  });
+  $('miniClose')?.addEventListener('click', () => closeMiniPlayer());
+  syncMiniLoopButton();
+  $('miniScrub')?.addEventListener('click', (event) => {
+    const audio = $('miniAudio');
+    const track = event.currentTarget;
+    if (!audio || !audio.duration) return;
+    const rect = track.getBoundingClientRect();
+    const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+    try { audio.currentTime = ratio * audio.duration; } catch { /* ok */ }
+    syncMiniProgress();
+  });
   $('grid').onclick = (event) => {
     const enter = event.target.closest('[data-enter]');
     if (enter) return selectFolder(enter.dataset.enter).catch((err) => toast(err.message));
@@ -3870,12 +4207,15 @@ function wire() {
     if (!card) return;
     event.preventDefault();
     const file = fileByPath(card.dataset.file);
-    openMenu(event.clientX, event.clientY, [
+    const menu = [
       { label: '播放', run: () => openFile(file) },
       { label: '重命名', run: async () => { const next = await renamePath(file.path, false); if (next) await refreshBrowse(); } },
-      { label: '删除', danger: true, run: async () => { if (await deletePath(file.path, false)) await refreshBrowse(); } },
-      { label: '转成 720p', run: () => startConvert('/api/convert/file?' + qs({ path: file.path, quality: '720p' })) }
-    ]);
+      { label: '删除', danger: true, run: async () => { if (await deletePath(file.path, false)) await refreshBrowse(); } }
+    ];
+    if (file.type === 'video') {
+      menu.push({ label: '转成 720p', run: () => startConvert('/api/convert/file?' + qs({ path: file.path, quality: '720p' })) });
+    }
+    openMenu(event.clientX, event.clientY, menu);
   };
   $('grid').addEventListener('dragstart', (event) => {
     const card = event.target.closest('[data-file]');

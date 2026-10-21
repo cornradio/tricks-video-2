@@ -108,12 +108,13 @@ try {
           <div class="seg" id="filterSeg">
             <button type="button" data-filter="all">全部</button>
             <button type="button" data-filter="video">视频</button>
+            <button type="button" data-filter="audio">音频</button>
             <button type="button" data-filter="image">图片</button>
           </div>
           <button class="text-btn" id="cardPrefsBtn" type="button">卡片设置</button>
           <button class="text-btn" id="folderHistoryBtn" type="button" title="此文件夹及子文件夹是否写入播放历史">历史记录(开)</button>
           <button class="text-btn" id="uploadBtn" type="button">上传</button>
-          <input id="uploadInput" type="file" accept="video/*,image/*" multiple hidden>
+          <input id="uploadInput" type="file" accept="video/*,audio/*,image/*,.mp3,.m4a,.aac,.flac,.wav,.ogg,.opus,.wma" multiple hidden>
         </div>
         <div id="folderHead" class="folder-head"></div>
         <div id="grid" class="grid"></div>
@@ -330,6 +331,38 @@ try {
 <div id="ctx" class="ctx" hidden></div>
 <div id="modal" class="modal-back" hidden></div>
 <div id="dock" class="dock" hidden></div>
+<div id="miniPlayer" class="mini-player" hidden>
+  <audio id="miniAudio" preload="metadata"></audio>
+  <button type="button" id="miniClose" class="mini-close" title="关闭">×</button>
+  <div class="mini-cover" id="miniCover"><span aria-hidden="true">♪</span></div>
+  <div class="mini-main">
+    <div class="mini-title" id="miniTitle">—</div>
+    <div class="mini-sub" id="miniSub"></div>
+    <div class="mini-scrub" id="miniScrub" title="进度"><i><b id="miniFill"></b></i></div>
+    <div class="mini-meta">
+      <span id="miniTime">0:00 / 0:00</span>
+      <div class="mini-controls">
+        <button type="button" id="miniPrev" title="上一首" aria-label="上一首">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg>
+        </button>
+        <button type="button" id="miniPlay" class="mini-play" title="播放/暂停" aria-label="播放/暂停">
+          <svg class="mini-icon-play" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+          <svg class="mini-icon-pause" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" hidden><path d="M6 5h4v14H6zm8 0h4v14h-4z"/></svg>
+        </button>
+        <button type="button" id="miniNext" title="下一首" aria-label="下一首">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16 6h2v12h-2zM6 18l8.5-6L6 6v12z"/></svg>
+        </button>
+        <button type="button" id="miniLoop" title="单曲循环：关" aria-label="单曲循环" aria-pressed="false">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 014-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 01-4 4H3"/></svg>
+          <span class="mini-loop-1">1</span>
+        </button>
+        <button type="button" id="miniOpen" title="打开详情（备注 / 下载）" aria-label="打开详情">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
 <div id="hoverPreview" class="hover-preview" hidden>
   <div id="hoverShell" class="hover-shell">
     <video id="hoverVideo" playsinline muted preload="auto" loop></video>
