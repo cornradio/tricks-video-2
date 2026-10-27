@@ -257,7 +257,7 @@ async function toggleMusicMode() {
   }
   const track = state.audioTrack;
   if (track && fileKind(track) === 'video') {
-    const audio = $('miniAudio');
+    const audio = audioEngine();
     const time = audio && Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
     try {
       await openFile({ ...track }, time);
@@ -1062,7 +1062,7 @@ async function openFile(file, time) {
     await openAudio(file, time);
     return;
   }
-  const mini = $('miniAudio');
+  const mini = audioEngine();
   if (mini && !mini.paused) { mini.pause(); syncMiniPlayButton(); }
   releaseVideo();
   state.player = { kind: 'file', ...file };
@@ -1105,8 +1105,35 @@ function audioStreamUrl(track) {
   if (fileKind(track) === 'video') return '/api/play?' + qs({ path: track.path });
   return '/api/stream?' + qs({ path: track.path });
 }
+/** Video files need <video>; pure audio uses <audio> so Apple Control Center shows prev/next, not ±10s. */
+function audioEngineNeedsVideo(track = state.audioTrack) {
+  return fileKind(track) === 'video';
+}
+function audioEngine() {
+  const useVideo = audioEngineNeedsVideo();
+  return (useVideo ? $('miniAudioV') : $('miniAudioA')) || $('miniAudioA') || $('miniAudioV');
+}
+function silenceAudioEngine(el) {
+  if (!el) return;
+  try { el.pause(); } catch { /* ok */ }
+  el.removeAttribute('src');
+  try { el.load(); } catch { /* ok */ }
+}
+function stopIdleAudioEngines(active) {
+  ['miniAudioA', 'miniAudioV'].forEach((id) => {
+    const el = $(id);
+    if (!el || el === active) return;
+    silenceAudioEngine(el);
+  });
+}
+function forEachAudioEngine(fn) {
+  ['miniAudioA', 'miniAudioV'].forEach((id) => {
+    const el = $(id);
+    if (el) fn(el);
+  });
+}
 function syncMiniPlayButton() {
-  const audio = $('miniAudio');
+  const audio = audioEngine();
   const playing = !!(audio && !audio.paused && !audio.ended);
   $('miniPlayer')?.classList.toggle('is-playing', playing);
   $('audioStage')?.classList.toggle('is-playing', playing);
@@ -1121,7 +1148,7 @@ function paintAudioProgress(cur, dur) {
 }
 function syncMiniProgress() {
   if (state.audioScrubbing) return;
-  const audio = $('miniAudio');
+  const audio = audioEngine();
   if (!audio) return;
   const cur = audio.currentTime || 0;
   const dur = Number.isFinite(audio.duration) ? audio.duration : 0;
@@ -1373,6 +1400,7 @@ function clearMediaSession() {
   if (!('mediaSession' in navigator)) return;
   try {
     navigator.mediaSession.metadata = null;
+    // Explicitly clear seek handlers — on Apple they steal the UI from prev/next.
     ['play', 'pause', 'previoustrack', 'nexttrack', 'seekto', 'seekbackward', 'seekforward'].forEach((action) => {
       try { navigator.mediaSession.setActionHandler(action, null); } catch { /* unsupported */ }
     });
@@ -1397,26 +1425,19 @@ function updateMediaSession() {
   const bind = (action, handler) => {
     try { navigator.mediaSession.setActionHandler(action, handler); } catch { /* ok */ }
   };
-  bind('play', () => { const a = $('miniAudio'); if (a) a.play().catch(() => {}); });
-  bind('pause', () => { const a = $('miniAudio'); if (a) a.pause(); });
+  // Do NOT bind seekbackward/seekforward: Apple Control Center then shows ±10s instead of 上一首/下一首.
+  bind('play', () => { const a = audioEngine(); if (a) a.play().catch(() => {}); });
+  bind('pause', () => { const a = audioEngine(); if (a) a.pause(); });
   bind('previoustrack', () => playAudioRelative(-1));
   bind('nexttrack', () => playAudioRelative(1));
   bind('seekto', (details) => {
-    const a = $('miniAudio');
+    const a = audioEngine();
     if (!a || details?.seekTime == null) return;
     try { a.currentTime = details.seekTime; } catch { /* ok */ }
   });
-  bind('seekbackward', (details) => {
-    const a = $('miniAudio');
-    if (!a) return;
-    try { a.currentTime = Math.max(0, a.currentTime - (details?.seekOffset || 10)); } catch { /* ok */ }
-  });
-  bind('seekforward', (details) => {
-    const a = $('miniAudio');
-    if (!a) return;
-    try { a.currentTime = Math.min(a.duration || a.currentTime + 10, a.currentTime + (details?.seekOffset || 10)); } catch { /* ok */ }
-  });
-  const audio = $('miniAudio');
+  try { navigator.mediaSession.setActionHandler('seekbackward', null); } catch { /* ok */ }
+  try { navigator.mediaSession.setActionHandler('seekforward', null); } catch { /* ok */ }
+  const audio = audioEngine();
   if (audio && Number.isFinite(audio.duration) && audio.duration > 0) {
     try {
       navigator.mediaSession.setPositionState({
@@ -1570,7 +1591,7 @@ async function commitAudioPendingDelete(keepPath) {
 async function openAudioDetail() {
   const track = state.audioTrack;
   if (!track) return;
-  const audio = $('miniAudio');
+  const audio = audioEngine();
   const time = audio && Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
   if (audio && !audio.paused) audio.pause();
   syncMiniPlayButton();
@@ -1612,12 +1633,7 @@ function clearAudioBlob() {
   }
 }
 function closeMiniPlayer() {
-  const audio = $('miniAudio');
-  if (audio) {
-    audio.pause();
-    audio.removeAttribute('src');
-    try { audio.load(); } catch { /* ok */ }
-  }
+  forEachAudioEngine(silenceAudioEngine);
   clearAudioBlob();
   state.audioTrack = null;
   state.audioCacheBlob = null;
@@ -1639,8 +1655,6 @@ async function openAudio(file, time) {
   state.audioCacheBlob = null;
   state.audioCacheKey = '';
   state.audioPrefetchToken += 1;
-  const audio = $('miniAudio');
-  if (!audio) return;
   let src = '';
   if (file.kind === 'local' || file.handle) {
     const blob = await file.handle.getFile();
@@ -1653,7 +1667,9 @@ async function openAudio(file, time) {
     src = audioStreamUrl(file);
     state.audioTrack = { kind: 'file', ...file };
   }
-  // miniAudio is a hidden <video>: mute video plane, keep audio (needed for MP4).
+  const audio = audioEngine();
+  if (!audio) return;
+  stopIdleAudioEngines(audio);
   try { audio.muted = false; } catch { /* ok */ }
   try { audio.playsInline = true; } catch { /* ok */ }
   audio.loop = !!state.audioLoop;
@@ -1702,7 +1718,7 @@ function syncMiniLoopButton() {
     btn.title = on ? '单曲循环：开' : '单曲循环：关';
     btn.setAttribute('aria-pressed', on ? 'true' : 'false');
   });
-  const audio = $('miniAudio');
+  const audio = audioEngine();
   if (audio) audio.loop = on;
 }
 function toggleMiniLoop() {
@@ -1712,7 +1728,7 @@ function toggleMiniLoop() {
   toast(state.audioLoop ? '单曲循环已开' : '单曲循环已关');
 }
 function toggleMiniPlay() {
-  const audio = $('miniAudio');
+  const audio = audioEngine();
   if (!audio || !state.audioTrack) return;
   if (audio.paused) audio.play().catch(() => {});
   else audio.pause();
@@ -1728,7 +1744,7 @@ function playAudioRelative(step) {
   if (next) openAudio(next).catch((err) => toast(err.message));
 }
 function seekAudioRatio(ratio, { commit = true } = {}) {
-  const audio = $('miniAudio');
+  const audio = audioEngine();
   if (!audio) return;
   const dur = Number.isFinite(audio.duration) ? audio.duration : 0;
   if (!dur) return;
@@ -1754,7 +1770,7 @@ function finishAudioScrub(el, event) {
   state.audioScrubbing = false;
   el?.classList.remove('is-dragging');
   seekAudioFromEvent(event, el, { commit: true });
-  const audio = $('miniAudio');
+  const audio = audioEngine();
   const resume = state.audioScrubResume;
   state.audioScrubResume = false;
   updateMediaSession();
@@ -1786,7 +1802,7 @@ function bindAudioScrub(el) {
   el.addEventListener('pointerdown', (event) => {
     if (event.button != null && event.button !== 0) return;
     event.preventDefault();
-    const audio = $('miniAudio');
+    const audio = audioEngine();
     state.audioScrubResume = !!(audio && !audio.paused && !audio.ended);
     if (state.audioScrubResume) {
       audio.pause();
@@ -4873,10 +4889,10 @@ function wire() {
       toast('上传好了');
     } catch (err) { toast(err.message); }
   };
-  const miniAudio = $('miniAudio');
-  if (miniAudio) {
+  forEachAudioEngine((miniAudio) => {
     miniAudio.volume = Math.min(1, Math.max(0, state.audioVolume));
     miniAudio.addEventListener('timeupdate', () => {
+      if (miniAudio !== audioEngine()) return;
       syncMiniProgress();
       if ('mediaSession' in navigator && state.audioTrack && !state.audioScrubbing) {
         try {
@@ -4891,21 +4907,25 @@ function wire() {
       }
     });
     miniAudio.addEventListener('seeked', () => {
+      if (miniAudio !== audioEngine()) return;
       if (!state.audioScrubbing) syncMiniProgress();
     });
     miniAudio.addEventListener('play', () => {
+      if (miniAudio !== audioEngine()) return;
       syncMiniPlayButton();
       if ('mediaSession' in navigator) {
         try { navigator.mediaSession.playbackState = 'playing'; } catch { /* ok */ }
       }
     });
     miniAudio.addEventListener('pause', () => {
+      if (miniAudio !== audioEngine()) return;
       syncMiniPlayButton();
       if ('mediaSession' in navigator) {
         try { navigator.mediaSession.playbackState = 'paused'; } catch { /* ok */ }
       }
     });
     miniAudio.addEventListener('ended', () => {
+      if (miniAudio !== audioEngine()) return;
       if (state.audioLoop) {
         try { miniAudio.currentTime = 0; } catch { /* ok */ }
         miniAudio.play().catch(() => {});
@@ -4916,7 +4936,7 @@ function wire() {
       if (list.length > 1) playAudioRelative(1);
       else syncMiniPlayButton();
     });
-  }
+  });
   $('miniPlay')?.addEventListener('click', () => toggleMiniPlay());
   $('miniPrev')?.addEventListener('click', () => playAudioRelative(-1));
   $('miniNext')?.addEventListener('click', () => playAudioRelative(1));
@@ -4950,7 +4970,7 @@ function wire() {
     const vol = Number($('audioStageVol').value);
     state.audioVolume = Number.isFinite(vol) ? Math.min(1, Math.max(0, vol)) : 1;
     localStorage.setItem('tv2-audio-vol', String(state.audioVolume));
-    if ($('miniAudio')) $('miniAudio').volume = state.audioVolume;
+    forEachAudioEngine((el) => { el.volume = state.audioVolume; });
   });
   $('audioStageVolMenu')?.addEventListener('click', (event) => event.stopPropagation());
   $('audioStageInfoBtn')?.addEventListener('click', (event) => {
