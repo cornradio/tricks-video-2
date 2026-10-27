@@ -44,7 +44,15 @@ const state = {
   cardPrefs: null,
   audioTrack: null,
   audioBlobUrl: '',
-  audioLoop: localStorage.getItem('tv2-audio-loop') === '1'
+  audioCacheBlob: null,
+  audioCacheKey: '',
+  audioPrefetchToken: 0,
+  audioLoop: localStorage.getItem('tv2-audio-loop') === '1',
+  audioVolume: Number(localStorage.getItem('tv2-audio-vol') || '1') || 1,
+  audioScrubbing: false,
+  audioInfoPath: '',
+  audioPaletteKey: '',
+  audioPaletteToken: 0
 };
 
 const ACCENTS = [
@@ -909,7 +917,8 @@ function syncPathInput() {
 }
 async function selectFolder(dir, opts = {}) {
   if (!opts.keepPlayer) closePlayer();
-  resetShuffleCycle();
+  if (!opts.preserveShuffle) resetShuffleCycle();
+  const keepScroll = opts.preserveScroll ? ($('main')?.scrollTop || 0) : null;
   state.folder = dir;
   syncPathInput();
   localStorage.setItem('tv2-folder', dir);
@@ -944,6 +953,13 @@ async function selectFolder(dir, opts = {}) {
   }
   renderFolderHead();
   renderGrid();
+  if (keepScroll != null) {
+    const main = $('main');
+    if (main) {
+      main.scrollTop = keepScroll;
+      requestAnimationFrame(() => { main.scrollTop = keepScroll; });
+    }
+  }
 }
 
 function fileByPath(filePath) {
@@ -1001,35 +1017,232 @@ function audioList() {
   if (list.length) return list;
   return (state.files || []).filter((item) => fileKind(item) === 'audio');
 }
+function audioCoverUrl(track, absolute = false) {
+  if (!track?.path) return '';
+  const rel = '/api/thumbnail?' + qs({ path: track.path, t: 'cover', _: state.coverStamp });
+  return absolute ? (location.origin + rel) : rel;
+}
+function audioStreamUrl(track) {
+  if (!track?.path) return '';
+  // Prefer /api/stream for audio: range + cacheable, no remux path.
+  return '/api/stream?' + qs({ path: track.path });
+}
 function syncMiniPlayButton() {
-  const box = $('miniPlayer');
   const audio = $('miniAudio');
-  if (!box || !audio) return;
-  box.classList.toggle('is-playing', !audio.paused && !audio.ended);
+  const playing = !!(audio && !audio.paused && !audio.ended);
+  $('miniPlayer')?.classList.toggle('is-playing', playing);
+  $('audioStage')?.classList.toggle('is-playing', playing);
+}
+function paintAudioProgress(cur, dur) {
+  const label = clock(cur) + ' / ' + (dur ? clock(dur) : '—');
+  const pct = dur ? ((Math.min(cur, dur) / dur) * 100) + '%' : '0%';
+  if ($('miniTime')) $('miniTime').textContent = label;
+  if ($('miniFill')) $('miniFill').style.width = pct;
+  if ($('audioStageTime')) $('audioStageTime').textContent = label;
+  if ($('audioStageFill')) $('audioStageFill').style.width = pct;
 }
 function syncMiniProgress() {
+  if (state.audioScrubbing) return;
   const audio = $('miniAudio');
   if (!audio) return;
   const cur = audio.currentTime || 0;
   const dur = Number.isFinite(audio.duration) ? audio.duration : 0;
-  if ($('miniTime')) $('miniTime').textContent = clock(cur) + ' / ' + (dur ? clock(dur) : '—');
-  if ($('miniFill')) $('miniFill').style.width = dur ? ((cur / dur) * 100) + '%' : '0%';
+  paintAudioProgress(cur, dur);
 }
-function renderMiniCover(track) {
-  const cover = $('miniCover');
-  if (!cover) return;
-  const src = track?.path
-    ? `/api/thumbnail?${qs({ path: track.path, t: 'cover', _: state.coverStamp })}`
-    : '';
-  if (!src) {
-    cover.innerHTML = '<span aria-hidden="true">♪</span>';
+function clampByte(n) {
+  return Math.max(0, Math.min(255, Math.round(n)));
+}
+function rgbCss(r, g, b) {
+  return `rgb(${clampByte(r)}, ${clampByte(g)}, ${clampByte(b)})`;
+}
+function rgbToHsl(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  if (max === min) return { h: 0, s: 0, l };
+  const d = max - min;
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  let h = 0;
+  if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+  else if (max === g) h = ((b - r) / d + 2) / 6;
+  else h = ((r - g) / d + 4) / 6;
+  return { h, s, l };
+}
+function hslToRgb(h, s, l) {
+  if (s === 0) {
+    const v = l * 255;
+    return { r: v, g: v, b: v };
+  }
+  const hue2rgb = (p, q, t) => {
+    let tt = t;
+    if (tt < 0) tt += 1;
+    if (tt > 1) tt -= 1;
+    if (tt < 1 / 6) return p + (q - p) * 6 * tt;
+    if (tt < 1 / 2) return q;
+    if (tt < 2 / 3) return p + (q - p) * (2 / 3 - tt) * 6;
+    return p;
+  };
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  return {
+    r: hue2rgb(p, q, h + 1 / 3) * 255,
+    g: hue2rgb(p, q, h) * 255,
+    b: hue2rgb(p, q, h - 1 / 3) * 255
+  };
+}
+function relativeLuma(r, g, b) {
+  const toLin = (c) => {
+    const x = c / 255;
+    return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * toLin(r) + 0.7152 * toLin(g) + 0.0722 * toLin(b);
+}
+function clearAudioStagePalette() {
+  const stage = $('audioStage');
+  if (!stage) return;
+  ['--stage-accent', '--stage-accent-ink', '--stage-bg', '--stage-glow'].forEach((key) => {
+    stage.style.removeProperty(key);
+  });
+  state.audioPaletteKey = '';
+}
+function applyAudioStagePalette(palette) {
+  const stage = $('audioStage');
+  if (!stage || !palette) {
+    clearAudioStagePalette();
     return;
   }
-  cover.innerHTML = `<img alt="" src="${esc(src)}">`;
-  const img = cover.querySelector('img');
-  if (img) {
-    img.onerror = () => { cover.innerHTML = '<span aria-hidden="true">♪</span>'; };
+  stage.style.setProperty('--stage-accent', palette.accent);
+  stage.style.setProperty('--stage-accent-ink', palette.ink);
+  stage.style.setProperty('--stage-bg', palette.bg);
+  stage.style.setProperty('--stage-glow', palette.glow);
+}
+function paletteFromImage(img) {
+  const size = 48;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return null;
+  ctx.drawImage(img, 0, 0, size, size);
+  let data;
+  try { data = ctx.getImageData(0, 0, size, size).data; }
+  catch { return null; }
+  let sumR = 0;
+  let sumG = 0;
+  let sumB = 0;
+  let count = 0;
+  let best = null;
+  let bestScore = -1;
+  for (let i = 0; i < data.length; i += 4) {
+    const a = data[i + 3];
+    if (a < 200) continue;
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    const { h, s, l } = rgbToHsl(r, g, b);
+    if (l < 0.08 || l > 0.92) continue;
+    sumR += r; sumG += g; sumB += b; count += 1;
+    const score = s * 1.35 + (1 - Math.abs(l - 0.45)) * 0.55;
+    if (score > bestScore) {
+      bestScore = score;
+      best = { r, g, b, h, s, l };
+    }
   }
+  if (!count) return null;
+  const avg = { r: sumR / count, g: sumG / count, b: sumB / count };
+  const avgHsl = rgbToHsl(avg.r, avg.g, avg.b);
+  const accentSrc = best && best.s > 0.12 ? best : { ...avg, ...avgHsl };
+  const accentRgb = hslToRgb(
+    accentSrc.h,
+    Math.min(0.78, Math.max(0.38, accentSrc.s * 1.15 + 0.12)),
+    Math.min(0.62, Math.max(0.42, accentSrc.l * 0.55 + 0.28))
+  );
+  const bgRgb = hslToRgb(
+    avgHsl.h,
+    Math.min(0.55, avgHsl.s * 0.7 + 0.12),
+    Math.min(0.18, Math.max(0.08, avgHsl.l * 0.22 + 0.06))
+  );
+  const ink = relativeLuma(accentRgb.r, accentRgb.g, accentRgb.b) > 0.55
+    ? '#1a120c'
+    : '#fff8f2';
+  const glowRgb = hslToRgb(
+    accentSrc.h,
+    Math.min(0.7, accentSrc.s * 0.9 + 0.2),
+    Math.min(0.55, Math.max(0.35, accentSrc.l * 0.5 + 0.25))
+  );
+  return {
+    accent: rgbCss(accentRgb.r, accentRgb.g, accentRgb.b),
+    ink,
+    bg: rgbCss(bgRgb.r, bgRgb.g, bgRgb.b),
+    glow: `color-mix(in srgb, ${rgbCss(glowRgb.r, glowRgb.g, glowRgb.b)} 42%, transparent)`
+  };
+}
+async function refreshAudioStagePalette(track, img) {
+  const key = track?.path || track?.key || '';
+  const token = ++state.audioPaletteToken;
+  if (!key || !img) {
+    clearAudioStagePalette();
+    return;
+  }
+  if (state.audioPaletteKey === key && $('audioStage')?.style.getPropertyValue('--stage-accent')) return;
+  const run = () => {
+    if (token !== state.audioPaletteToken) return;
+    if ((state.audioTrack?.path || state.audioTrack?.key || '') !== key) return;
+    const palette = paletteFromImage(img);
+    if (!palette) {
+      clearAudioStagePalette();
+      return;
+    }
+    state.audioPaletteKey = key;
+    applyAudioStagePalette(palette);
+  };
+  if (img.complete && img.naturalWidth) run();
+  else {
+    await new Promise((resolve) => {
+      img.addEventListener('load', resolve, { once: true });
+      img.addEventListener('error', resolve, { once: true });
+    });
+    run();
+  }
+}
+function paintAudioCover(el, track) {
+  if (!el) return;
+  const art = el.querySelector('.mini-cover-art') || el;
+  const src = audioCoverUrl(track);
+  const showFallback = () => {
+    art.innerHTML = art.classList.contains('mini-cover-art')
+      ? '♪'
+      : '<span aria-hidden="true">♪</span>';
+    if (el.id === 'audioStageArt') clearAudioStagePalette();
+  };
+  if (!src) {
+    showFallback();
+    return;
+  }
+  art.innerHTML = `<img alt="" src="${esc(src)}">`;
+  const img = art.querySelector('img');
+  if (!img) return;
+  img.onerror = showFallback;
+  if (el.id === 'audioStageArt') {
+    refreshAudioStagePalette(track, img).catch(() => clearAudioStagePalette());
+  }
+}
+function syncAudioStage() {
+  const stage = $('audioStage');
+  const track = state.audioTrack;
+  if (!stage || stage.hidden || !track) return;
+  if ($('audioStageTitle')) $('audioStageTitle').textContent = track.name || '音频';
+  if ($('audioStageSub')) {
+    const folder = track.path ? dirname(track.path).split(/[/\\]/).pop() : (track.parent || '');
+    $('audioStageSub').textContent = folder || '';
+  }
+  paintAudioCover($('audioStageArt'), track);
+  const vol = $('audioStageVol');
+  if (vol) vol.value = String(state.audioVolume);
+  syncMiniPlayButton();
+  syncMiniProgress();
+  syncMiniLoopButton();
 }
 function syncMiniPlayer() {
   const box = $('miniPlayer');
@@ -1037,6 +1250,8 @@ function syncMiniPlayer() {
   if (!box) return;
   if (!track) {
     box.hidden = true;
+    closeAudioStage();
+    clearMediaSession();
     return;
   }
   box.hidden = false;
@@ -1045,10 +1260,12 @@ function syncMiniPlayer() {
     const folder = track.path ? dirname(track.path).split(/[/\\]/).pop() : (track.parent || '');
     $('miniSub').textContent = folder || '';
   }
-  renderMiniCover(track);
+  paintAudioCover($('miniCover'), track);
   syncMiniPlayButton();
   syncMiniProgress();
   syncMiniLoopButton();
+  syncAudioStage();
+  updateMediaSession();
   document.querySelectorAll('.card[data-file], .card[data-local-file]').forEach((card) => {
     const match = !!(
       (track.path && card.dataset.file && card.dataset.file === track.path)
@@ -1056,6 +1273,165 @@ function syncMiniPlayer() {
     );
     card.classList.toggle('now-playing', match);
   });
+}
+function openAudioStage() {
+  if (!state.audioTrack) return;
+  const stage = $('audioStage');
+  if (!stage) return;
+  stage.hidden = false;
+  document.body.classList.add('audio-stage-open');
+  syncAudioStage();
+}
+function closeAudioStage() {
+  const stage = $('audioStage');
+  if (!stage) return;
+  stage.hidden = true;
+  document.body.classList.remove('audio-stage-open');
+  const menu = $('audioStageVolMenu');
+  const btn = $('audioStageVolBtn');
+  if (menu) menu.hidden = true;
+  if (btn) btn.setAttribute('aria-expanded', 'false');
+  closeAudioInfoMenu();
+  clearAudioStagePalette();
+}
+function clearMediaSession() {
+  if (!('mediaSession' in navigator)) return;
+  try {
+    navigator.mediaSession.metadata = null;
+    ['play', 'pause', 'previoustrack', 'nexttrack', 'seekto', 'seekbackward', 'seekforward'].forEach((action) => {
+      try { navigator.mediaSession.setActionHandler(action, null); } catch { /* unsupported */ }
+    });
+  } catch { /* ok */ }
+}
+function updateMediaSession() {
+  if (!('mediaSession' in navigator) || !state.audioTrack) return;
+  const track = state.audioTrack;
+  const folder = track.path ? dirname(track.path).split(/[/\\]/).pop() : (track.parent || '');
+  const art = audioCoverUrl(track, true);
+  try {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: track.name || '音频',
+      artist: folder || 'Tricks Video',
+      album: folder || '',
+      artwork: art ? [
+        { src: art, sizes: '512x512', type: 'image/jpeg' },
+        { src: art, sizes: '256x256', type: 'image/jpeg' }
+      ] : []
+    });
+  } catch { /* MediaMetadata unavailable */ }
+  const bind = (action, handler) => {
+    try { navigator.mediaSession.setActionHandler(action, handler); } catch { /* ok */ }
+  };
+  bind('play', () => { const a = $('miniAudio'); if (a) a.play().catch(() => {}); });
+  bind('pause', () => { const a = $('miniAudio'); if (a) a.pause(); });
+  bind('previoustrack', () => playAudioRelative(-1));
+  bind('nexttrack', () => playAudioRelative(1));
+  bind('seekto', (details) => {
+    const a = $('miniAudio');
+    if (!a || details?.seekTime == null) return;
+    try { a.currentTime = details.seekTime; } catch { /* ok */ }
+  });
+  bind('seekbackward', (details) => {
+    const a = $('miniAudio');
+    if (!a) return;
+    try { a.currentTime = Math.max(0, a.currentTime - (details?.seekOffset || 10)); } catch { /* ok */ }
+  });
+  bind('seekforward', (details) => {
+    const a = $('miniAudio');
+    if (!a) return;
+    try { a.currentTime = Math.min(a.duration || a.currentTime + 10, a.currentTime + (details?.seekOffset || 10)); } catch { /* ok */ }
+  });
+  const audio = $('miniAudio');
+  if (audio && Number.isFinite(audio.duration) && audio.duration > 0) {
+    try {
+      navigator.mediaSession.setPositionState({
+        duration: audio.duration,
+        playbackRate: audio.playbackRate || 1,
+        position: Math.min(audio.currentTime || 0, audio.duration)
+      });
+    } catch { /* ok */ }
+  }
+}
+function prefetchAudioCache(track) {
+  if (!track?.path) return;
+  const key = track.path;
+  if (state.audioCacheKey === key && state.audioCacheBlob) return;
+  const token = ++state.audioPrefetchToken;
+  const url = audioStreamUrl(track);
+  fetch(url, { cache: 'force-cache', credentials: 'same-origin' })
+    .then((res) => (res.ok ? res.blob() : Promise.reject()))
+    .then((blob) => {
+      if (token !== state.audioPrefetchToken) return;
+      if (state.audioTrack?.path !== key) return;
+      state.audioCacheBlob = blob;
+      state.audioCacheKey = key;
+    })
+    .catch(() => {
+      // Fallback: fill cache from network once (still shared with audio element via HTTP cache).
+      if (token !== state.audioPrefetchToken) return;
+      fetch(url, { cache: 'default', credentials: 'same-origin' })
+        .then((res) => (res.ok ? res.blob() : null))
+        .then((blob) => {
+          if (!blob || token !== state.audioPrefetchToken) return;
+          if (state.audioTrack?.path !== key) return;
+          state.audioCacheBlob = blob;
+          state.audioCacheKey = key;
+        })
+        .catch(() => {});
+    });
+}
+async function downloadAudioCached() {
+  const track = state.audioTrack;
+  if (!track) return toast('没有正在播放的歌曲');
+  try {
+    let blob = null;
+    if (state.audioBlobUrl && (track.kind === 'local' || track.handle)) {
+      blob = await fetch(state.audioBlobUrl).then((r) => r.blob());
+    } else if (state.audioCacheBlob && state.audioCacheKey === track.path) {
+      blob = state.audioCacheBlob;
+    } else if (track.path) {
+      toast('正在从缓存取文件…');
+      const url = audioStreamUrl(track);
+      let res = await fetch(url, { cache: 'force-cache', credentials: 'same-origin' });
+      if (!res.ok) res = await fetch(url, { cache: 'default', credentials: 'same-origin' });
+      if (!res.ok) throw new Error('下载失败');
+      blob = await res.blob();
+      state.audioCacheBlob = blob;
+      state.audioCacheKey = track.path;
+    }
+    if (!blob) throw new Error('没有可下载的数据');
+    const href = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = href;
+    link.download = track.name || 'audio';
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(href), 4000);
+    toast('已开始下载');
+  } catch (err) {
+    toast(err.message || '下载失败');
+  }
+}
+async function softRemoveFile(filePath) {
+  const main = $('main');
+  const scroll = main?.scrollTop || 0;
+  state.files = state.files.filter((file) => file.path !== filePath);
+  state.selected.delete(filePath);
+  if (state.audioTrack?.path === filePath) {
+    const nextList = audioList();
+    if (nextList.length) await openAudio(nextList[0]).catch(() => closeMiniPlayer());
+    else closeMiniPlayer();
+  }
+  renderGrid();
+  if (main) {
+    main.scrollTop = scroll;
+    requestAnimationFrame(() => { main.scrollTop = scroll; });
+  }
+  if (state.root) {
+    api('/api/tree?' + qs({ path: state.root })).then((tree) => {
+      state.tree = tree;
+      renderSide();
+    }).catch(() => {});
+  }
 }
 async function openAudioDetail() {
   const track = state.audioTrack;
@@ -1089,7 +1465,7 @@ async function openAudioDetail() {
   const video = $('video');
   video.hidden = false;
   $('still').hidden = true;
-  video.src = '/api/play?' + qs({ path: track.path });
+  video.src = audioStreamUrl(track) || ('/api/play?' + qs({ path: track.path }));
   cuePlayback(video, time);
   loadSubtitles(track.subtitles || []);
   await loadSidePanel();
@@ -1110,6 +1486,11 @@ function closeMiniPlayer() {
   }
   clearAudioBlob();
   state.audioTrack = null;
+  state.audioCacheBlob = null;
+  state.audioCacheKey = '';
+  state.audioPrefetchToken += 1;
+  closeAudioStage();
+  clearMediaSession();
   syncMiniPlayer();
 }
 async function openAudio(file, time) {
@@ -1118,20 +1499,31 @@ async function openAudio(file, time) {
   if (main && !main.paused) main.pause();
   hideHover();
   clearAudioBlob();
+  state.audioCacheBlob = null;
+  state.audioCacheKey = '';
+  state.audioPrefetchToken += 1;
   const audio = $('miniAudio');
   if (!audio) return;
   let src = '';
   if (file.kind === 'local' || file.handle) {
     const blob = await file.handle.getFile();
     state.audioBlobUrl = URL.createObjectURL(blob);
+    state.audioCacheBlob = blob;
+    state.audioCacheKey = file.path || file.key || '';
     src = state.audioBlobUrl;
     state.audioTrack = { kind: 'local', ...file };
   } else {
-    src = '/api/play?' + qs({ path: file.path });
+    src = audioStreamUrl(file);
     state.audioTrack = { kind: 'file', ...file };
   }
   audio.loop = !!state.audioLoop;
+  audio.volume = Math.min(1, Math.max(0, state.audioVolume));
+  audio.preload = 'auto';
   audio.src = src;
+  state.audioInfoPath = '';
+  state.audioScrubbing = false;
+  state.audioPaletteKey = '';
+  state.audioPaletteToken += 1;
   const at = Number(time) || 0;
   const start = () => {
     if (at > 0.05) {
@@ -1139,20 +1531,28 @@ async function openAudio(file, time) {
     }
     audio.play().catch(() => {});
     syncMiniPlayButton();
+    updateMediaSession();
   };
   if (audio.readyState >= 1) start();
   else audio.addEventListener('loadedmetadata', start, { once: true });
+  audio.addEventListener('canplay', () => prefetchAudioCache(state.audioTrack), { once: true });
   syncMiniPlayer();
+  if ($('audioStageInfoMenu') && !$('audioStageInfoMenu').hidden) {
+    loadAudioStageInfo(true).catch(() => {});
+  }
   if (file.path) rememberHistory(file.path, file.name, Number(time) || 0);
 }
 function syncMiniLoopButton() {
-  const btn = $('miniLoop');
-  if (!btn) return;
-  btn.classList.toggle('on', !!state.audioLoop);
-  btn.title = state.audioLoop ? '单曲循环：开' : '单曲循环：关';
-  btn.setAttribute('aria-pressed', state.audioLoop ? 'true' : 'false');
+  const on = !!state.audioLoop;
+  ['miniLoop', 'audioStageLoop'].forEach((id) => {
+    const btn = $(id);
+    if (!btn) return;
+    btn.classList.toggle('on', on);
+    btn.title = on ? '单曲循环：开' : '单曲循环：关';
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
   const audio = $('miniAudio');
-  if (audio) audio.loop = !!state.audioLoop;
+  if (audio) audio.loop = on;
 }
 function toggleMiniLoop() {
   state.audioLoop = !state.audioLoop;
@@ -1175,6 +1575,124 @@ function playAudioRelative(step) {
   const index = list.findIndex((item) => (item.path || item.key) === key);
   const next = list[(index + step + list.length) % list.length];
   if (next) openAudio(next).catch((err) => toast(err.message));
+}
+function seekAudioFromEvent(event, scrubEl, { commit = true } = {}) {
+  const audio = $('miniAudio');
+  const track = scrubEl || event.currentTarget;
+  if (!audio || !track) return;
+  const dur = Number.isFinite(audio.duration) ? audio.duration : 0;
+  if (!dur) return;
+  const rect = track.getBoundingClientRect();
+  const clientX = event.clientX ?? event.touches?.[0]?.clientX;
+  if (clientX == null) return;
+  const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+  const next = ratio * dur;
+  paintAudioProgress(next, dur);
+  if (!commit) return;
+  try { audio.currentTime = next; } catch { /* ok */ }
+  updateMediaSession();
+}
+function bindAudioScrub(el) {
+  if (!el || el.dataset.scrubBound) return;
+  el.dataset.scrubBound = '1';
+  let lastCommit = 0;
+  const onMove = (event) => {
+    if (!state.audioScrubbing) return;
+    const now = performance.now();
+    const commit = now - lastCommit > 80;
+    if (commit) lastCommit = now;
+    seekAudioFromEvent(event, el, { commit });
+  };
+  const onUp = (event) => {
+    if (!state.audioScrubbing) return;
+    state.audioScrubbing = false;
+    el.classList.remove('is-dragging');
+    seekAudioFromEvent(event, el, { commit: true });
+    try { el.releasePointerCapture?.(event.pointerId); } catch { /* ok */ }
+  };
+  el.addEventListener('pointerdown', (event) => {
+    if (event.button != null && event.button !== 0) return;
+    event.preventDefault();
+    state.audioScrubbing = true;
+    el.classList.add('is-dragging');
+    lastCommit = performance.now();
+    try { el.setPointerCapture(event.pointerId); } catch { /* ok */ }
+    seekAudioFromEvent(event, el, { commit: true });
+  });
+  el.addEventListener('pointermove', onMove);
+  el.addEventListener('pointerup', onUp);
+  el.addEventListener('pointercancel', onUp);
+  el.addEventListener('click', (event) => event.preventDefault());
+}
+function closeAudioInfoMenu() {
+  const menu = $('audioStageInfoMenu');
+  const btn = $('audioStageInfoBtn');
+  if (menu) menu.hidden = true;
+  if (btn) btn.setAttribute('aria-expanded', 'false');
+}
+function renderAudioInfoBody(info, extra = {}) {
+  const body = $('audioStageInfoBody');
+  if (!body) return;
+  if (!info) {
+    body.innerHTML = `<div class="sub">${esc(extra.error || '暂无信息')}</div>`;
+    return;
+  }
+  const bits = [
+    infoRow('名称', info.name),
+    infoRow('大小', info.size != null ? formatSize(info.size) : ''),
+    infoRow('时长', info.duration ? formatDurationLong(info.duration) : ''),
+    infoRow('格式', info.formatName || info.container || info.ext),
+    infoRow('编码', info.audioCodec || info.audioCodecTag),
+    infoRow('采样', info.sampleRate ? (info.sampleRate + ' Hz') : ''),
+    infoRow('声道', info.channels ? (info.channels + (info.channelLayout ? `（${info.channelLayout}）` : '')) : ''),
+    infoRow('码率', formatBitrate(info.audioBitrate || info.bitrate)),
+    infoRow('路径', info.path)
+  ].filter(Boolean);
+  body.innerHTML = bits.length
+    ? `<div class="info-grid">${bits.join('')}</div>`
+    : '<div class="sub">没有可显示的元信息</div>';
+}
+async function loadAudioStageInfo(force = false) {
+  const track = state.audioTrack;
+  const body = $('audioStageInfoBody');
+  if (!body) return;
+  if (!track?.path) {
+    renderAudioInfoBody(null, { error: '当前没有音频' });
+    return;
+  }
+  if (!force && state.audioInfoPath === track.path && body.querySelector('.info-grid')) return;
+  body.innerHTML = '<div class="sub">读取中…</div>';
+  state.audioInfoPath = track.path;
+  try {
+    const info = await api('/api/file-info?' + qs({ path: track.path }));
+    if (state.audioTrack?.path !== track.path) return;
+    renderAudioInfoBody(info);
+  } catch (err) {
+    if (state.audioTrack?.path !== track.path) return;
+    renderAudioInfoBody({
+      name: track.name,
+      path: track.path,
+      size: track.size,
+      type: 'audio',
+      ext: track.ext
+    }, { error: err.message });
+    if (err?.message) toast(err.message);
+  }
+}
+async function toggleAudioInfoMenu() {
+  const menu = $('audioStageInfoMenu');
+  const btn = $('audioStageInfoBtn');
+  if (!menu || !btn) return;
+  const open = menu.hidden;
+  if (open) {
+    $('audioStageVolMenu') && ($('audioStageVolMenu').hidden = true);
+    $('audioStageVolBtn')?.setAttribute('aria-expanded', 'false');
+    menu.hidden = false;
+    btn.setAttribute('aria-expanded', 'true');
+    await loadAudioStageInfo();
+  } else {
+    closeAudioInfoMenu();
+  }
 }
 
 function vttSeconds(stamp) {
@@ -4148,9 +4666,36 @@ function wire() {
   };
   const miniAudio = $('miniAudio');
   if (miniAudio) {
-    miniAudio.addEventListener('timeupdate', syncMiniProgress);
-    miniAudio.addEventListener('play', syncMiniPlayButton);
-    miniAudio.addEventListener('pause', syncMiniPlayButton);
+    miniAudio.volume = Math.min(1, Math.max(0, state.audioVolume));
+    miniAudio.addEventListener('timeupdate', () => {
+      syncMiniProgress();
+      if ('mediaSession' in navigator && state.audioTrack && !state.audioScrubbing) {
+        try {
+          if (Number.isFinite(miniAudio.duration) && miniAudio.duration > 0) {
+            navigator.mediaSession.setPositionState({
+              duration: miniAudio.duration,
+              playbackRate: miniAudio.playbackRate || 1,
+              position: Math.min(miniAudio.currentTime || 0, miniAudio.duration)
+            });
+          }
+        } catch { /* ok */ }
+      }
+    });
+    miniAudio.addEventListener('seeked', () => {
+      if (!state.audioScrubbing) syncMiniProgress();
+    });
+    miniAudio.addEventListener('play', () => {
+      syncMiniPlayButton();
+      if ('mediaSession' in navigator) {
+        try { navigator.mediaSession.playbackState = 'playing'; } catch { /* ok */ }
+      }
+    });
+    miniAudio.addEventListener('pause', () => {
+      syncMiniPlayButton();
+      if ('mediaSession' in navigator) {
+        try { navigator.mediaSession.playbackState = 'paused'; } catch { /* ok */ }
+      }
+    });
     miniAudio.addEventListener('ended', () => {
       if (state.audioLoop) {
         try { miniAudio.currentTime = 0; } catch { /* ok */ }
@@ -4167,19 +4712,69 @@ function wire() {
   $('miniPrev')?.addEventListener('click', () => playAudioRelative(-1));
   $('miniNext')?.addEventListener('click', () => playAudioRelative(1));
   $('miniLoop')?.addEventListener('click', () => toggleMiniLoop());
-  $('miniOpen')?.addEventListener('click', () => {
-    openAudioDetail().catch((err) => toast(err.message));
-  });
+  $('miniCover')?.addEventListener('click', () => openAudioStage());
   $('miniClose')?.addEventListener('click', () => closeMiniPlayer());
   syncMiniLoopButton();
-  $('miniScrub')?.addEventListener('click', (event) => {
-    const audio = $('miniAudio');
-    const track = event.currentTarget;
-    if (!audio || !audio.duration) return;
-    const rect = track.getBoundingClientRect();
-    const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
-    try { audio.currentTime = ratio * audio.duration; } catch { /* ok */ }
-    syncMiniProgress();
+  bindAudioScrub($('miniScrub'));
+  bindAudioScrub($('audioStageScrub'));
+  $('audioStageClose')?.addEventListener('click', () => closeAudioStage());
+  $('audioStagePlay')?.addEventListener('click', () => toggleMiniPlay());
+  $('audioStagePrev')?.addEventListener('click', () => playAudioRelative(-1));
+  $('audioStageNext')?.addEventListener('click', () => playAudioRelative(1));
+  $('audioStageLoop')?.addEventListener('click', () => toggleMiniLoop());
+  $('audioStageDownload')?.addEventListener('click', () => {
+    downloadAudioCached().catch((err) => toast(err.message));
+  });
+  const closeVolMenu = () => {
+    const menu = $('audioStageVolMenu');
+    const btn = $('audioStageVolBtn');
+    if (menu) menu.hidden = true;
+    if (btn) btn.setAttribute('aria-expanded', 'false');
+  };
+  $('audioStageVolBtn')?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    closeAudioInfoMenu();
+    const menu = $('audioStageVolMenu');
+    const btn = $('audioStageVolBtn');
+    if (!menu || !btn) return;
+    const open = menu.hidden;
+    menu.hidden = !open;
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+  $('audioStageVol')?.addEventListener('input', () => {
+    const vol = Number($('audioStageVol').value);
+    state.audioVolume = Number.isFinite(vol) ? Math.min(1, Math.max(0, vol)) : 1;
+    localStorage.setItem('tv2-audio-vol', String(state.audioVolume));
+    if ($('miniAudio')) $('miniAudio').volume = state.audioVolume;
+  });
+  $('audioStageVolMenu')?.addEventListener('click', (event) => event.stopPropagation());
+  $('audioStageInfoBtn')?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    toggleAudioInfoMenu().catch((err) => toast(err.message));
+  });
+  $('audioStageInfoMenu')?.addEventListener('click', (event) => event.stopPropagation());
+  document.addEventListener('click', (event) => {
+    if (!event.target.closest?.('.audio-vol-wrap')) closeVolMenu();
+    if (!event.target.closest?.('.audio-info-wrap')) closeAudioInfoMenu();
+  });
+  document.addEventListener('keydown', (event) => {
+    if ($('audioStage')?.hidden) return;
+    if (event.target instanceof Element && event.target.matches('input, textarea')) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      if ($('audioStageVolMenu') && !$('audioStageVolMenu').hidden) closeVolMenu();
+      else if ($('audioStageInfoMenu') && !$('audioStageInfoMenu').hidden) closeAudioInfoMenu();
+      else closeAudioStage();
+    } else if (event.key === ' ') {
+      event.preventDefault();
+      toggleMiniPlay();
+    } else if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      playAudioRelative(-1);
+    } else if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      playAudioRelative(1);
+    }
   });
   $('grid').onclick = (event) => {
     const enter = event.target.closest('[data-enter]');
@@ -4209,10 +4804,16 @@ function wire() {
     const file = fileByPath(card.dataset.file);
     const menu = [
       { label: '播放', run: () => openFile(file) },
-      { label: '重命名', run: async () => { const next = await renamePath(file.path, false); if (next) await refreshBrowse(); } },
-      { label: '删除', danger: true, run: async () => { if (await deletePath(file.path, false)) await refreshBrowse(); } }
+      { label: '重命名', run: async () => {
+        const next = await renamePath(file.path, false);
+        if (!next) return;
+        await selectFolder(state.folder, { keepPlayer: true, preserveShuffle: true, preserveScroll: true });
+      } },
+      { label: '删除', danger: true, run: async () => {
+        if (await deletePath(file.path, false)) await softRemoveFile(file.path);
+      } }
     ];
-    if (file.type === 'video') {
+    if (fileKind(file) === 'video') {
       menu.push({ label: '转成 720p', run: () => startConvert('/api/convert/file?' + qs({ path: file.path, quality: '720p' })) });
     }
     openMenu(event.clientX, event.clientY, menu);

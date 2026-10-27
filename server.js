@@ -400,10 +400,10 @@ async function sendBytes(filePath, req, res, type, extra = {}) {
     end = Math.min(end, size - 1);
     status = 206;
   }
-  const headers = {
+    const headers = {
     'Content-Type': type,
     'Accept-Ranges': 'bytes',
-    'Content-Length': end - start + 1,
+    'Content-Length': String(end - start + 1),
     'Cache-Control': 'no-store',
     ...extra
   };
@@ -599,9 +599,16 @@ app.get('/api/stream', async (req, res) => {
   if (!filePath) return;
   try {
     const download = req.query.download === '1';
-    const extra = download
-      ? { 'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(path.basename(filePath))}` }
-      : {};
+    const ext = path.extname(filePath).toLowerCase();
+    const isAudio = AUDIO_EXTS.has(ext);
+    const stat = await fsp.stat(filePath);
+    const extra = {
+      ...(download
+        ? { 'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(path.basename(filePath))}` }
+        : {}),
+      'Cache-Control': isAudio && !download ? 'private, max-age=604800' : (download ? 'private, max-age=60' : 'no-store'),
+      ETag: '"' + stat.size + '-' + Math.floor(stat.mtimeMs) + '"'
+    };
     await sendBytes(filePath, req, res, contentType(filePath), extra);
   } catch (err) {
     if (!res.headersSent) res.status(404).json({ error: err.message });
@@ -627,7 +634,14 @@ app.get('/api/play', async (req, res) => {
   if (!filePath) return;
   try {
     const playable = await ensurePlayable(filePath);
-    await sendBytes(playable, req, res, contentType(playable));
+    const ext = path.extname(playable).toLowerCase();
+    const isAudio = AUDIO_EXTS.has(ext);
+    const stat = await fsp.stat(playable);
+    await sendBytes(playable, req, res, contentType(playable), {
+      // Audio: allow browser HTTP cache so progressive play + later "download from cache" work.
+      'Cache-Control': isAudio ? 'private, max-age=604800' : 'no-store',
+      ETag: '"' + stat.size + '-' + Math.floor(stat.mtimeMs) + '"'
+    });
   } catch (err) {
     if (!res.headersSent) res.status(500).json({ error: '无法播放: ' + err.message });
     else res.destroy();
