@@ -50,6 +50,12 @@ const PRESETS = {
   '720p': { name: '720p 手机', height: 720, video: 2000, audio: 96 },
   '480p': { name: '480p 最小', height: 480, video: 1000, audio: 64 }
 };
+const AUDIO_PRESETS = {
+  '320k': { name: '高质量 320k', bitrate: 320, ext: '.mp3' },
+  '192k': { name: '标准 192k', bitrate: 192, ext: '.mp3' },
+  '128k': { name: '省空间 128k', bitrate: 128, ext: '.mp3' },
+  '96k': { name: '最小 96k', bitrate: 96, ext: '.mp3' }
+};
 const FUNNY = ['地板杀手', '膝盖终结者', '重力叛逆者', '水泥冲浪王', '空中飞人', '刹车失灵', '轮子成精', '摔倒艺术家', '牛顿棺材板', '今天不摔了'];
 
 for (const dir of [DATA_DIR, THUMBS, TRICK_VIDEOS, TRIMMED, INCOMING, PLAY_CACHE]) {
@@ -1344,6 +1350,112 @@ app.get('/api/convert/file', async (req, res) => {
     else {
       try { fs.unlinkSync(output); } catch { /* partial */ }
       send({ type: 'error', msg: '转换失败' });
+    }
+    res.end();
+  });
+  child.once('error', (err) => { send({ type: 'error', msg: err.message }); res.end(); });
+});
+
+function uniqueAudioOutput(dir, base, quality, ext) {
+  let name = `${base}.${quality}${ext}`;
+  let full = path.join(dir, name);
+  let n = 2;
+  while (fs.existsSync(full)) {
+    name = `${base}.${quality}-${n}${ext}`;
+    full = path.join(dir, name);
+    n += 1;
+  }
+  return full;
+}
+
+app.get('/api/convert/audio', async (req, res) => {
+  const filePath = needPath(req, res);
+  if (!filePath) return;
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+    return res.status(404).json({ error: '文件不存在' });
+  }
+  const quality = AUDIO_PRESETS[req.query.quality] ? req.query.quality : '192k';
+  const preset = AUDIO_PRESETS[quality];
+  const send = sse(res);
+  const ext = path.extname(filePath).toLowerCase();
+  if (!AUDIO_EXTS.has(ext) && !VIDEO_EXTS.has(ext)) {
+    send({ type: 'error', msg: '不是可压缩的音视频文件' });
+    return res.end();
+  }
+  const base = path.basename(filePath, path.extname(filePath));
+  const output = uniqueAudioOutput(path.dirname(filePath), base, quality, preset.ext);
+  let duration = 0;
+  try {
+    const probed = await runCommand('ffprobe', [
+      '-v', 'error', '-show_entries', 'format=duration',
+      '-of', 'default=noprint_wrappers=1:nokey=1', filePath
+    ], [filePath], 8000);
+    duration = Number(probed.stdout.trim()) || 0;
+  } catch { /* progress stays coarse */ }
+
+  // Prefer sidecar / embedded cover so the compressed MP3 keeps artwork.
+  let coverSrc = null;
+  const manualCover = coverFile(filePath);
+  if (fs.existsSync(manualCover) && fs.statSync(manualCover).size > 200) coverSrc = manualCover;
+  else {
+    try { coverSrc = await ensureAudioCover(filePath); } catch { coverSrc = null; }
+  }
+
+  const tracked = [filePath, output];
+  const args = ['-y', '-hide_banner', '-i', filePath];
+  if (coverSrc) {
+    args.push('-i', coverSrc);
+    tracked.push(coverSrc);
+  }
+  args.push('-map', '0:a:0?');
+  if (coverSrc) {
+    args.push(
+      '-map', '1:0',
+      '-c:v', 'mjpeg',
+      '-disposition:v:0', 'attached_pic',
+      '-metadata:s:v', 'title=Album cover',
+      '-metadata:s:v', 'comment=Cover (front)'
+    );
+  }
+  args.push(
+    '-c:a', 'libmp3lame', '-b:a', preset.bitrate + 'k',
+    '-id3v2_version', '3',
+    '-progress', 'pipe:1', output
+  );
+  send({
+    type: 'start',
+    file: path.basename(filePath),
+    output: path.basename(output),
+    quality,
+    command: formatCmd('ffmpeg', args.filter((item) => item !== '-progress' && item !== 'pipe:1')),
+    overall: 0
+  });
+  const child = spawnTracked('ffmpeg', args, tracked);
+  const stop = () => lease.killProcess(child);
+  req.on('close', stop);
+  child.stdout.on('data', (chunk) => {
+    const match = /out_time_ms=(\d+)/.exec(chunk.toString());
+    if (match && duration) {
+      const percent = Math.min(99, Math.round((Number(match[1]) / 1000000) / duration * 100));
+      send({ type: 'progress', percent, overall: percent, name: path.basename(filePath) });
+    }
+  });
+  child.once('close', (code) => {
+    if (code === 0 && fs.existsSync(output)) {
+      // Keep manual sidecar cover for the new file (thumbnail API prefers it).
+      try {
+        if (coverSrc && fs.existsSync(coverSrc)) {
+          fs.copyFileSync(coverSrc, coverFile(output));
+        } else if (fs.existsSync(manualCover)) {
+          fs.copyFileSync(manualCover, coverFile(output));
+        }
+      } catch { /* cover copy optional */ }
+      let size = 0;
+      try { size = fs.statSync(output).size; } catch { /* ok */ }
+      send({ type: 'done', output, size, quality, percent: 100, overall: 100 });
+    } else {
+      try { fs.unlinkSync(output); } catch { /* partial */ }
+      send({ type: 'error', msg: '音频压缩失败' });
     }
     res.end();
   });

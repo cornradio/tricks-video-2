@@ -9,7 +9,7 @@ const state = {
   folders: [],
   playlist: [],
   sort: localStorage.getItem('tv2-sort') || 'name_asc',
-  filter: 'all',
+  filter: 'all', // restored per-folder via tv2-folder-filters
   query: '',
   selected: new Set(),
   thumbTime: 1,
@@ -50,9 +50,12 @@ const state = {
   audioLoop: localStorage.getItem('tv2-audio-loop') === '1',
   audioVolume: Number(localStorage.getItem('tv2-audio-vol') || '1') || 1,
   audioScrubbing: false,
+  audioScrubResume: false,
   audioInfoPath: '',
   audioPaletteKey: '',
-  audioPaletteToken: 0
+  audioPaletteToken: 0,
+  audioPendingDelete: null,
+  musicMode: localStorage.getItem('tv2-music-mode') === '1'
 };
 
 const ACCENTS = [
@@ -214,6 +217,56 @@ function fileKind(file) {
   if (byName === 'image' || byName === 'audio' || byName === 'video') return byName;
   if (file.type === 'image' || file.type === 'audio' || file.type === 'video') return file.type;
   return byName || '';
+}
+/** In music mode, videos open in the audio player too. */
+function playsAsAudio(file) {
+  const kind = fileKind(file);
+  if (kind === 'audio') return true;
+  return !!(state.musicMode && kind === 'video');
+}
+function syncMusicModeButton() {
+  const btn = $('musicModeBtn');
+  if (!btn) return;
+  const on = !!state.musicMode;
+  btn.classList.toggle('on', on);
+  btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  btn.title = on
+    ? '音乐模式开：视频用音乐播放器听（再点关闭）'
+    : '音乐模式：视频也用音乐播放器听';
+}
+async function toggleMusicMode() {
+  state.musicMode = !state.musicMode;
+  localStorage.setItem('tv2-music-mode', state.musicMode ? '1' : '0');
+  syncMusicModeButton();
+  if (state.musicMode) {
+    const player = state.player;
+    const main = $('video');
+    if (player && fileKind(player) === 'video') {
+      const time = main && Number.isFinite(main.currentTime) ? main.currentTime : 0;
+      try {
+        await openAudio({ ...player }, time);
+        closePlayer();
+        toast('已用音乐播放器继续播');
+      } catch (err) {
+        toast(err.message || '切到音乐播放失败');
+      }
+      return;
+    }
+    toast('音乐模式已开：点视频用播放器听');
+    return;
+  }
+  const track = state.audioTrack;
+  if (track && fileKind(track) === 'video') {
+    const audio = $('miniAudio');
+    const time = audio && Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+    try {
+      await openFile({ ...track }, time);
+    } catch (err) {
+      toast(err.message || '切回视频失败');
+      return;
+    }
+  }
+  toast('音乐模式已关');
 }
 function toast(message) {
   const el = $('toast');
@@ -915,11 +968,35 @@ function syncPathInput() {
   const input = $('pathInput');
   if (input && document.activeElement !== input) input.value = state.root || '';
 }
+function readFolderFilterMap() {
+  try { return JSON.parse(localStorage.getItem('tv2-folder-filters') || '{}'); } catch { return {}; }
+}
+function normalizeFolderFilter(value) {
+  return ['all', 'video', 'audio', 'image'].includes(value) ? value : 'all';
+}
+function loadFolderFilter(folder) {
+  if (!folder) return 'all';
+  const map = readFolderFilterMap();
+  return normalizeFolderFilter(map[folder] || 'all');
+}
+function saveFolderFilter(folder, filter) {
+  if (!folder) return;
+  const map = readFolderFilterMap();
+  const next = normalizeFolderFilter(filter);
+  if (next === 'all') delete map[folder];
+  else map[folder] = next;
+  localStorage.setItem('tv2-folder-filters', JSON.stringify(map));
+}
+function applyFolderFilter(folder) {
+  state.filter = loadFolderFilter(folder);
+  syncSortButtons();
+}
 async function selectFolder(dir, opts = {}) {
   if (!opts.keepPlayer) closePlayer();
   if (!opts.preserveShuffle) resetShuffleCycle();
   const keepScroll = opts.preserveScroll ? ($('main')?.scrollTop || 0) : null;
   state.folder = dir;
+  applyFolderFilter(dir);
   syncPathInput();
   localStorage.setItem('tv2-folder', dir);
   const node = findNode(state.tree, dir);
@@ -981,7 +1058,7 @@ function cuePlayback(video, time) {
 }
 async function openFile(file, time) {
   if (!file) return;
-  if (fileKind(file) === 'audio') {
+  if (playsAsAudio(file)) {
     await openAudio(file, time);
     return;
   }
@@ -1010,12 +1087,12 @@ async function openFile(file, time) {
 
 function audioList() {
   if (state.view === 'local') {
-    return (state.local.files || []).filter((item) => fileKind(item) === 'audio');
+    return (state.local.files || []).filter((item) => playsAsAudio(item));
   }
   const list = (state.playlist && state.playlist.length ? state.playlist : visibleFiles(state.files || []))
-    .filter((item) => fileKind(item) === 'audio');
+    .filter((item) => playsAsAudio(item));
   if (list.length) return list;
-  return (state.files || []).filter((item) => fileKind(item) === 'audio');
+  return (state.files || []).filter((item) => playsAsAudio(item));
 }
 function audioCoverUrl(track, absolute = false) {
   if (!track?.path) return '';
@@ -1024,7 +1101,8 @@ function audioCoverUrl(track, absolute = false) {
 }
 function audioStreamUrl(track) {
   if (!track?.path) return '';
-  // Prefer /api/stream for audio: range + cacheable, no remux path.
+  // Videos need /api/play (remux / browser-playable). Pure audio can use cacheable stream.
+  if (fileKind(track) === 'video') return '/api/play?' + qs({ path: track.path });
   return '/api/stream?' + qs({ path: track.path });
 }
 function syncMiniPlayButton() {
@@ -1243,6 +1321,7 @@ function syncAudioStage() {
   syncMiniPlayButton();
   syncMiniProgress();
   syncMiniLoopButton();
+  syncAudioDeleteUi();
 }
 function syncMiniPlayer() {
   const box = $('miniPlayer');
@@ -1287,11 +1366,7 @@ function closeAudioStage() {
   if (!stage) return;
   stage.hidden = true;
   document.body.classList.remove('audio-stage-open');
-  const menu = $('audioStageVolMenu');
-  const btn = $('audioStageVolBtn');
-  if (menu) menu.hidden = true;
-  if (btn) btn.setAttribute('aria-expanded', 'false');
-  closeAudioInfoMenu();
+  closeAudioStageMenus();
   clearAudioStagePalette();
 }
 function clearMediaSession() {
@@ -1411,11 +1486,15 @@ async function downloadAudioCached() {
     toast(err.message || '下载失败');
   }
 }
+function dropFileFromLists(filePath) {
+  state.files = (state.files || []).filter((file) => file.path !== filePath);
+  if (state.playlist?.length) state.playlist = state.playlist.filter((file) => file.path !== filePath);
+  state.selected.delete(filePath);
+}
 async function softRemoveFile(filePath) {
   const main = $('main');
   const scroll = main?.scrollTop || 0;
-  state.files = state.files.filter((file) => file.path !== filePath);
-  state.selected.delete(filePath);
+  dropFileFromLists(filePath);
   if (state.audioTrack?.path === filePath) {
     const nextList = audioList();
     if (nextList.length) await openAudio(nextList[0]).catch(() => closeMiniPlayer());
@@ -1431,6 +1510,61 @@ async function softRemoveFile(filePath) {
       state.tree = tree;
       renderSide();
     }).catch(() => {});
+  }
+}
+function isCurrentAudioPendingDelete() {
+  const pending = state.audioPendingDelete;
+  const track = state.audioTrack;
+  return !!(pending?.path && track?.path && pending.path === track.path);
+}
+function syncAudioDeleteUi() {
+  const marked = isCurrentAudioPendingDelete();
+  const btn = $('audioStageDeleteBtn');
+  const stateEl = $('audioStageDeletedState');
+  const badge = $('audioStageDeletedBadge');
+  if (btn) btn.hidden = marked;
+  if (stateEl) stateEl.hidden = !marked;
+  if (badge) badge.hidden = !marked;
+  $('audioStage')?.classList.toggle('is-pending-delete', marked);
+}
+function markAudioPendingDelete() {
+  const track = state.audioTrack;
+  if (!track?.path) return toast('当前没有可删除的文件');
+  if (track.kind === 'local' || track.handle) return toast('本地文件暂不支持删除');
+  state.audioPendingDelete = { path: track.path, name: track.name || '音频' };
+  syncAudioDeleteUi();
+  toast('已标记删除，切到下一首后才会真正删除');
+}
+function undoAudioPendingDelete() {
+  if (!state.audioPendingDelete) return;
+  state.audioPendingDelete = null;
+  syncAudioDeleteUi();
+  toast('已撤销删除');
+}
+async function commitAudioPendingDelete(keepPath) {
+  const pending = state.audioPendingDelete;
+  if (!pending?.path) return;
+  if (keepPath && pending.path === keepPath) return;
+  state.audioPendingDelete = null;
+  syncAudioDeleteUi();
+  const name = pending.name || pending.path.split(/[/\\]/).pop() || '文件';
+  try {
+    await api('/api/file/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: pending.path })
+    });
+    dropFileFromLists(pending.path);
+    renderGrid();
+    if (state.root) {
+      api('/api/tree?' + qs({ path: state.root })).then((tree) => {
+        state.tree = tree;
+        renderSide();
+      }).catch(() => {});
+    }
+    toast(`已删除 ${name}`);
+  } catch (err) {
+    toast(err.message || '删除失败');
   }
 }
 async function openAudioDetail() {
@@ -1492,9 +1626,12 @@ function closeMiniPlayer() {
   closeAudioStage();
   clearMediaSession();
   syncMiniPlayer();
+  commitAudioPendingDelete(null).catch((err) => toast(err.message));
 }
 async function openAudio(file, time) {
   if (!file) return;
+  const nextPath = file.path || file.key || '';
+  await commitAudioPendingDelete(nextPath);
   const main = $('video');
   if (main && !main.paused) main.pause();
   hideHover();
@@ -1516,27 +1653,41 @@ async function openAudio(file, time) {
     src = audioStreamUrl(file);
     state.audioTrack = { kind: 'file', ...file };
   }
+  // miniAudio is a hidden <video>: mute video plane, keep audio (needed for MP4).
+  try { audio.muted = false; } catch { /* ok */ }
+  try { audio.playsInline = true; } catch { /* ok */ }
   audio.loop = !!state.audioLoop;
   audio.volume = Math.min(1, Math.max(0, state.audioVolume));
   audio.preload = 'auto';
   audio.src = src;
+  try { audio.load(); } catch { /* ok */ }
   state.audioInfoPath = '';
   state.audioScrubbing = false;
   state.audioPaletteKey = '';
   state.audioPaletteToken += 1;
   const at = Number(time) || 0;
+  let started = false;
   const start = () => {
+    if (started) return;
+    started = true;
     if (at > 0.05) {
       try { audio.currentTime = at; } catch { /* ok */ }
     }
-    audio.play().catch(() => {});
+    audio.play().catch((err) => toast(err?.message || '播放失败'));
     syncMiniPlayButton();
     updateMediaSession();
   };
   if (audio.readyState >= 1) start();
-  else audio.addEventListener('loadedmetadata', start, { once: true });
+  else {
+    audio.addEventListener('loadedmetadata', start, { once: true });
+    audio.addEventListener('error', () => {
+      const err = audio.error;
+      toast(err?.message || '这个文件没法当音频播');
+    }, { once: true });
+  }
   audio.addEventListener('canplay', () => prefetchAudioCache(state.audioTrack), { once: true });
   syncMiniPlayer();
+  syncAudioDeleteUi();
   if ($('audioStageInfoMenu') && !$('audioStageInfoMenu').hidden) {
     loadAudioStageInfo(true).catch(() => {});
   }
@@ -1576,48 +1727,75 @@ function playAudioRelative(step) {
   const next = list[(index + step + list.length) % list.length];
   if (next) openAudio(next).catch((err) => toast(err.message));
 }
-function seekAudioFromEvent(event, scrubEl, { commit = true } = {}) {
+function seekAudioRatio(ratio, { commit = true } = {}) {
   const audio = $('miniAudio');
-  const track = scrubEl || event.currentTarget;
-  if (!audio || !track) return;
+  if (!audio) return;
   const dur = Number.isFinite(audio.duration) ? audio.duration : 0;
   if (!dur) return;
+  const next = Math.min(1, Math.max(0, ratio)) * dur;
+  paintAudioProgress(next, dur);
+  if (!commit) return next;
+  // Avoid tiny no-op seeks that still glitch the decoder.
+  if (Math.abs((audio.currentTime || 0) - next) < 0.04) return next;
+  try { audio.currentTime = next; } catch { /* ok */ }
+  return next;
+}
+function seekAudioFromEvent(event, scrubEl, opts = {}) {
+  const track = scrubEl || event.currentTarget;
+  if (!track) return;
   const rect = track.getBoundingClientRect();
   const clientX = event.clientX ?? event.touches?.[0]?.clientX;
   if (clientX == null) return;
   const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
-  const next = ratio * dur;
-  paintAudioProgress(next, dur);
-  if (!commit) return;
-  try { audio.currentTime = next; } catch { /* ok */ }
+  return seekAudioRatio(ratio, opts);
+}
+function finishAudioScrub(el, event) {
+  if (!state.audioScrubbing) return;
+  state.audioScrubbing = false;
+  el?.classList.remove('is-dragging');
+  seekAudioFromEvent(event, el, { commit: true });
+  const audio = $('miniAudio');
+  const resume = state.audioScrubResume;
+  state.audioScrubResume = false;
   updateMediaSession();
+  if (!resume || !audio) {
+    syncMiniPlayButton();
+    return;
+  }
+  const play = () => {
+    audio.play().catch(() => {});
+    syncMiniPlayButton();
+    updateMediaSession();
+  };
+  if (audio.seeking) audio.addEventListener('seeked', play, { once: true });
+  else play();
 }
 function bindAudioScrub(el) {
   if (!el || el.dataset.scrubBound) return;
   el.dataset.scrubBound = '1';
-  let lastCommit = 0;
   const onMove = (event) => {
     if (!state.audioScrubbing) return;
-    const now = performance.now();
-    const commit = now - lastCommit > 80;
-    if (commit) lastCommit = now;
-    seekAudioFromEvent(event, el, { commit });
+    // Paint only while dragging — commit once on release to avoid double-play glitch.
+    seekAudioFromEvent(event, el, { commit: false });
   };
   const onUp = (event) => {
     if (!state.audioScrubbing) return;
-    state.audioScrubbing = false;
-    el.classList.remove('is-dragging');
-    seekAudioFromEvent(event, el, { commit: true });
+    finishAudioScrub(el, event);
     try { el.releasePointerCapture?.(event.pointerId); } catch { /* ok */ }
   };
   el.addEventListener('pointerdown', (event) => {
     if (event.button != null && event.button !== 0) return;
     event.preventDefault();
+    const audio = $('miniAudio');
+    state.audioScrubResume = !!(audio && !audio.paused && !audio.ended);
+    if (state.audioScrubResume) {
+      audio.pause();
+      syncMiniPlayButton();
+    }
     state.audioScrubbing = true;
     el.classList.add('is-dragging');
-    lastCommit = performance.now();
     try { el.setPointerCapture(event.pointerId); } catch { /* ok */ }
-    seekAudioFromEvent(event, el, { commit: true });
+    seekAudioFromEvent(event, el, { commit: false });
   });
   el.addEventListener('pointermove', onMove);
   el.addEventListener('pointerup', onUp);
@@ -1629,6 +1807,38 @@ function closeAudioInfoMenu() {
   const btn = $('audioStageInfoBtn');
   if (menu) menu.hidden = true;
   if (btn) btn.setAttribute('aria-expanded', 'false');
+}
+function closeAudioStageMenus() {
+  const volMenu = $('audioStageVolMenu');
+  const volBtn = $('audioStageVolBtn');
+  if (volMenu) volMenu.hidden = true;
+  if (volBtn) volBtn.setAttribute('aria-expanded', 'false');
+  closeAudioInfoMenu();
+}
+async function compressCurrentAudio(quality) {
+  const track = state.audioTrack;
+  if (!track?.path || track.kind === 'local' || track.handle) {
+    toast('本地文件暂不支持压缩');
+    return;
+  }
+  closeAudioStageMenus();
+  try {
+    const data = await startConvert('/api/convert/audio?' + qs({ path: track.path, quality: quality || '192k' }));
+    const name = String(data.output || '').split(/[/\\]/).pop() || '完成';
+    const sizeLabel = data.size != null ? formatSize(data.size) : '';
+    toast(sizeLabel ? `压缩完成：${name}（${sizeLabel}）` : `压缩完成：${name}`);
+    if (state.view === 'browse') await refreshBrowse().catch(() => {});
+    const next = fileByPath(data.output);
+    if (next && (await confirmAction('要播放压缩后的文件吗？', {
+      ok: '播放',
+      cancel: '不用',
+      body: `<p class="confirm-path">${esc(name)}${sizeLabel ? ` · ${esc(sizeLabel)}` : ''}</p>`
+    }))) {
+      await openAudio(next);
+    }
+  } catch (err) {
+    toast(err.message || '压缩失败');
+  }
 }
 function renderAudioInfoBody(info, extra = {}) {
   const body = $('audioStageInfoBody');
@@ -1685,8 +1895,7 @@ async function toggleAudioInfoMenu() {
   if (!menu || !btn) return;
   const open = menu.hidden;
   if (open) {
-    $('audioStageVolMenu') && ($('audioStageVolMenu').hidden = true);
-    $('audioStageVolBtn')?.setAttribute('aria-expanded', 'false');
+    closeAudioStageMenus();
     menu.hidden = false;
     btn.setAttribute('aria-expanded', 'true');
     await loadAudioStageInfo();
@@ -1694,7 +1903,6 @@ async function toggleAudioInfoMenu() {
     closeAudioInfoMenu();
   }
 }
-
 function vttSeconds(stamp) {
   const clean = String(stamp || '').trim().split(/\s+/)[0].replace(',', '.');
   const bits = clean.split(':');
@@ -3340,8 +3548,8 @@ async function renderLocalGrid() {
   }).join('') || '<div class="empty">这里没有媒体文件。</div>';
 }
 async function openLocalFile(file, time) {
-  if (fileKind(file) === 'audio') {
-    await openAudio({ kind: 'local', ...file, type: 'audio' }, time);
+  if (playsAsAudio(file)) {
+    await openAudio({ kind: 'local', ...file, type: fileKind(file) === 'video' ? 'video' : 'audio' }, time);
     return;
   }
   releaseVideo();
@@ -4560,7 +4768,8 @@ function wire() {
   $('filterSeg').onclick = (event) => {
     const button = event.target.closest('[data-filter]');
     if (!button) return;
-    state.filter = button.dataset.filter;
+    state.filter = normalizeFolderFilter(button.dataset.filter);
+    if (state.view === 'browse' && state.folder) saveFolderFilter(state.folder, state.filter);
     syncSortButtons();
     if (state.view === 'browse') renderGrid();
     if (state.view === 'local') renderLocalGrid().catch(() => {});
@@ -4725,21 +4934,17 @@ function wire() {
   $('audioStageDownload')?.addEventListener('click', () => {
     downloadAudioCached().catch((err) => toast(err.message));
   });
-  const closeVolMenu = () => {
-    const menu = $('audioStageVolMenu');
-    const btn = $('audioStageVolBtn');
-    if (menu) menu.hidden = true;
-    if (btn) btn.setAttribute('aria-expanded', 'false');
-  };
   $('audioStageVolBtn')?.addEventListener('click', (event) => {
     event.stopPropagation();
-    closeAudioInfoMenu();
     const menu = $('audioStageVolMenu');
     const btn = $('audioStageVolBtn');
     if (!menu || !btn) return;
     const open = menu.hidden;
-    menu.hidden = !open;
-    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    closeAudioStageMenus();
+    if (open) {
+      menu.hidden = false;
+      btn.setAttribute('aria-expanded', 'true');
+    }
   });
   $('audioStageVol')?.addEventListener('input', () => {
     const vol = Number($('audioStageVol').value);
@@ -4752,18 +4957,34 @@ function wire() {
     event.stopPropagation();
     toggleAudioInfoMenu().catch((err) => toast(err.message));
   });
-  $('audioStageInfoMenu')?.addEventListener('click', (event) => event.stopPropagation());
+  $('audioStageInfoMenu')?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    const pick = event.target.closest?.('[data-audio-quality]');
+    if (pick) {
+      compressCurrentAudio(pick.dataset.audioQuality).catch((err) => toast(err.message));
+      return;
+    }
+    if (event.target.closest?.('#audioStageDeleteBtn')) {
+      markAudioPendingDelete();
+      return;
+    }
+    if (event.target.closest?.('#audioStageDeleteUndo')) {
+      undoAudioPendingDelete();
+    }
+  });
   document.addEventListener('click', (event) => {
-    if (!event.target.closest?.('.audio-vol-wrap')) closeVolMenu();
-    if (!event.target.closest?.('.audio-info-wrap')) closeAudioInfoMenu();
+    if (event.target.closest?.('.audio-vol-wrap')) return;
+    if (event.target.closest?.('.audio-info-wrap')) return;
+    closeAudioStageMenus();
   });
   document.addEventListener('keydown', (event) => {
     if ($('audioStage')?.hidden) return;
     if (event.target instanceof Element && event.target.matches('input, textarea')) return;
     if (event.key === 'Escape') {
       event.preventDefault();
-      if ($('audioStageVolMenu') && !$('audioStageVolMenu').hidden) closeVolMenu();
-      else if ($('audioStageInfoMenu') && !$('audioStageInfoMenu').hidden) closeAudioInfoMenu();
+      const anyOpen = ($('audioStageVolMenu') && !$('audioStageVolMenu').hidden)
+        || ($('audioStageInfoMenu') && !$('audioStageInfoMenu').hidden);
+      if (anyOpen) closeAudioStageMenus();
       else closeAudioStage();
     } else if (event.key === ' ') {
       event.preventDefault();
@@ -4884,6 +5105,10 @@ function wire() {
   });
   bindTransport();
   bindVideoResize();
+  syncMusicModeButton();
+  $('musicModeBtn')?.addEventListener('click', () => {
+    toggleMusicMode().catch((err) => toast(err.message));
+  });
   $('douyinBtn').onclick = () => enterDouyin();
   $('douyinClose').onclick = (event) => {
     event.preventDefault();
