@@ -1169,7 +1169,7 @@ html[data-card-ui="in"] .card.placeholder .meta { min-height: 0; }
   border-radius: 18px;
   box-shadow: var(--shadow);
 }
-.pop, .ctx { position: fixed; z-index: 30; padding: 8px; min-width: 220px; }
+.pop, .ctx { position: fixed; z-index: 120; padding: 8px; min-width: 220px; }
 .pop-wide { width: min(420px, calc(100vw - 24px)); max-height: min(70vh, 560px); overflow: auto; }
 .ctx button, .pop button.menu-item {
   display: block;

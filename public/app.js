@@ -4720,17 +4720,27 @@ function wire() {
       renderLocalGrid().catch((err) => toast(err.message));
     }
   };
-  $('sideBody').oncontextmenu = (event) => {
+  $('sideBody').addEventListener('contextmenu', (event) => {
     const folder = event.target.closest('[data-folder]');
     if (!folder) return;
     event.preventDefault();
+    event.stopPropagation();
     const folderPath = folder.dataset.folder;
     openMenu(event.clientX, event.clientY, [
+      {
+        label: '添加为根目录',
+        run: async () => {
+          if (!folderPath) return;
+          remember(folderPath);
+          renderWorkspaceList();
+          toast(`已加入最近打开：${folderBase(folderPath)}`);
+        }
+      },
       { label: '新建文件夹', run: async () => { const name = await askText('新文件夹', ''); if (!name) return; await api('/api/folder/create', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ parent: folderPath, name }) }); await refreshBrowse(); } },
       { label: '重命名', run: async () => { const next = await renamePath(folderPath, true); if (next) { followPath(folderPath, next); await refreshBrowse(); } } },
       { label: '删除', danger: true, run: async () => { if (await deletePath(folderPath, true)) { if (state.folder === folderPath) state.folder = dirname(folderPath); await refreshBrowse(); } } }
     ]);
-  };
+  });
   $('sideBody').addEventListener('dragstart', (event) => {
     const folder = event.target.closest('[data-folder]');
     if (!folder) return;
